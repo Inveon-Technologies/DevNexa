@@ -1,0 +1,29 @@
+# Mirrors ALERT_RULES in backend/app/agents/monitoring.py (used by the simulated mode).
+groups:
+  - name: orders-service
+    rules:
+      - alert: OrdersServiceDown
+        expr: up{job="sample-app"} == 0 or sum(rate(http_requests_total{path="/health",status=~"5.."}[1m])) > 0
+        for: 30s
+        labels: { severity: critical, service: orders-service }
+        annotations: { summary: "orders-service liveness probe failing" }
+      - alert: UpstreamDependencyErrors
+        expr: max(orders_upstream_error_ratio) > 0.10
+        for: 30s
+        labels: { severity: critical, service: orders-service }
+        annotations: { summary: "Upstream call error ratio above 10%" }
+      - alert: OrdersHighErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[1m])) / clamp_min(sum(rate(http_requests_total[1m])), 1e-9) > 0.05
+        for: 30s
+        labels: { severity: critical, service: orders-service }
+        annotations: { summary: "HTTP 5xx ratio above 5%" }
+      - alert: OrdersMemoryPressure
+        expr: max(orders_memory_mb) > 450
+        for: 30s
+        labels: { severity: warning, service: orders-service }
+        annotations: { summary: "Memory above 450 MB" }
+      - alert: OrdersHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[1m]))) > 1
+        for: 30s
+        labels: { severity: warning, service: orders-service }
+        annotations: { summary: "p95 latency above 1s" }
