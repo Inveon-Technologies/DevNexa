@@ -1,0 +1,76 @@
+# Real CI for the sample app that reports each stage to DevNexa.
+# Configure repository secrets DEVNEXA_URL (e.g. https://devnexa.example.com) and DEVNEXA_TOKEN
+# (= DEVNEXA_GITHUB_WEBHOOK_SECRET on the backend). Without them the workflow still runs and just skips reporting.
+name: DevNexa pipeline
+
+on:
+  push:
+    paths: ["sample-app/**"]
+  workflow_dispatch:
+
+env:
+  DEVNEXA_URL: ${{ secrets.DEVNEXA_URL }}
+  DEVNEXA_TOKEN: ${{ secrets.DEVNEXA_TOKEN }}
+  RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Collect changed files
+        id: changes
+        run: |
+          FILES=$(git diff --name-only HEAD~1 HEAD -- sample-app | sed 's#^sample-app/##' | paste -sd, -)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Ask DevNexa for a test plan
+        if: env.DEVNEXA_URL != ''
+        run: curl -fsS "$DEVNEXA_URL/api/tests/prioritize?files=${{ steps.changes.outputs.files }}" | python -m json.tool | head -40 || true
+
+      - name: Build
+        id: build
+        working-directory: sample-app
+        run: |
+          set -o pipefail
+          (pip install -r requirements.txt pytest && python -m compileall -q app && docker build -t devnexa/sample-app:${GITHUB_SHA::7} .) 2>&1 | tee ../build.log
+
+      - name: Test
+        id: test
+        working-directory: sample-app
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee ../test.log
+
+      - name: Report to DevNexa
+        if: always() && env.DEVNEXA_URL != ''
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          FILES: ${{ steps.changes.outputs.files }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          def report(stage, outcome, logfile):
+              if outcome in ("", "skipped"):
+                  return
+              log = open(logfile).read()[-15000:] if os.path.exists(logfile) else ""
+              body = {"run_key": os.environ["RUN_KEY"], "commit_sha": os.environ["GITHUB_SHA"],
+                      "branch": os.environ["GITHUB_REF_NAME"], "author": os.environ["GITHUB_ACTOR"],
+                      "message": (os.environ.get("MSG") or "").splitlines()[0] if os.environ.get("MSG") else "",
+                      "files": [f for f in os.environ.get("FILES", "").split(",") if f],
+                      "repo": os.environ["GITHUB_REPOSITORY"], "stage": stage,
+                      "status": "success" if outcome == "success" else "failed", "log": log}
+              req = urllib.request.Request(os.environ["DEVNEXA_URL"] + "/api/webhooks/github/actions",
+                                           data=json.dumps(body).encode(), method="POST",
+                                           headers={"Content-Type": "application/json",
+                                                    "X-DevNexa-Token": os.environ.get("DEVNEXA_TOKEN", "")})
+              print(stage, urllib.request.urlopen(req).read().decode())
+          report("build", os.environ["BUILD"], "build.log")
+          report("test", os.environ["TEST"], "test.log")
+          PY
