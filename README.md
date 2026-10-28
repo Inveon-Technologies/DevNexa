@@ -75,6 +75,19 @@ from Prometheus, Loki and Jaeger. Faults are injected and remediated through the
 `docker restart` for container restarts). Set `DEVNEXA_MODE=simulated` to run the compose stack against the
 simulated environment instead.
 
+### Public deployment with HTTPS
+
+Point your domain's A record at the server, open ports 80 and 443 in its firewall, then:
+
+```bash
+echo "DEVNEXA_DOMAIN=devnexa.example.com" >> .env
+docker compose --profile https up -d --build
+```
+
+The `caddy` service obtains and renews a Let's Encrypt certificate and redirects HTTP to HTTPS. The dashboard has
+no login of its own, so only expose ports 80 and 443 publicly and keep the others (5432, 8000, 3000, 9090, …)
+closed in the server's firewall or cloud security group.
+
 ## Configuration
 
 All settings are environment variables with the `DEVNEXA_` prefix (see `backend/.env.example`).
