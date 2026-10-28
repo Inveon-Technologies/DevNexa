@@ -28,8 +28,8 @@ class AppAction:
 # medium/high wait for a person.
 APP_ACTIONS = {
     "retry_deploy": AppAction("Retry the deploy", "low", True, "Run the same deploy again (transient failures)."),
-    "use_npm_install": AppAction("Install with npm install", "low", True,
-                                 "Lockfile is out of sync; rebuild with `npm install` instead of `npm ci`."),
+    "use_npm_install": AppAction("Install without the frozen lockfile", "low", True,
+                                 "Lockfile is out of sync; rebuild with `npm install` / a non-frozen pnpm or yarn install."),
     "reroute_port": AppAction("Route to the detected port", "low", True,
                               "The app listens on a different port than expected; send traffic there."),
     "restart_app": AppAction("Restart the container", "low", True, "Restart a crashed or hung container."),
@@ -67,9 +67,16 @@ RULES: list[tuple[str, str, str, str, str, str, float]] = [
                 r"Read timed out|TLS handshake timeout|i/o timeout",
      "Network hiccup during the build", "A download failed because of a network error.",
      "Retrying usually fixes this.", "retry_deploy", 0.75),
+    ("pnpm_ignored_builds", r"ERR_PNPM_IGNORED_BUILDS|Ignored build scripts",
+     "pnpm blocked package build scripts",
+     "Newer pnpm versions refuse to run dependencies' install scripts (e.g. sharp) until they are approved.",
+     "Add the packages to pnpm.onlyBuiltDependencies in package.json. DevNexa's generated build now allows them; "
+     "a repo Dockerfile needs `--config.dangerously-allow-all-builds=true` on `pnpm install`.",
+     "retry_deploy", 0.85),
     ("npm_lockfile", r"npm ci` can only install packages when|npm ERR! code EUSAGE|npm error code EUSAGE|"
+                     r"ERR_PNPM_OUTDATED_LOCKFILE|ERR_PNPM_LOCKFILE_CONFIG_MISMATCH|"
                      r"lockfile.*(out of date|not in sync)|Missing: .* from lock file",
-     "package-lock.json is out of sync", "`npm ci` refuses to install because package.json and the lockfile differ.",
+     "Lockfile is out of sync", "The frozen install refuses to run because package.json and the lockfile differ.",
      "Run `npm install` locally and commit package-lock.json. DevNexa can build with `npm install` meanwhile.",
      "use_npm_install", 0.9),
     ("npm_missing_script", r'Missing script: "?(\w+)', "npm script missing",
