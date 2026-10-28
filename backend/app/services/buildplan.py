@@ -40,12 +40,20 @@ def _node_major(pkg: dict) -> str:
     return m.group(1) if m and m.group(1) in ("18", "20", "22", "24") else "20"
 
 
+# pnpm 10+ refuses to run dependencies' install scripts (sharp, esbuild, prisma, ...) unless they are
+# approved, and newer versions fail the install. A server build has no one to approve them, so allow them.
+PNPM_ALLOW_BUILDS = "--config.dangerously-allow-all-builds=true"
+
+
 def _node_install(root: Path, use_npm_install: bool) -> tuple[str, str]:
-    """Returns (copy line for manifests, install command)."""
+    """Returns (copy line for manifests, install command). `use_npm_install` also relaxes pnpm/yarn lockfiles."""
     if (root / "pnpm-lock.yaml").exists():
-        return "COPY package.json pnpm-lock.yaml ./", "corepack enable && pnpm install --frozen-lockfile"
+        frozen = "--no-frozen-lockfile" if use_npm_install else "--frozen-lockfile"
+        return ("COPY package.json pnpm-lock.yaml ./",
+                f"corepack enable && pnpm install {frozen} {PNPM_ALLOW_BUILDS}")
     if (root / "yarn.lock").exists():
-        return "COPY package.json yarn.lock ./", "corepack enable && yarn install --frozen-lockfile"
+        frozen = "" if use_npm_install else " --frozen-lockfile"
+        return "COPY package.json yarn.lock ./", f"corepack enable && yarn install{frozen}"
     if (root / "package-lock.json").exists() and not use_npm_install:
         return "COPY package.json package-lock.json ./", "npm ci"
     return "COPY package*.json ./", "npm install"

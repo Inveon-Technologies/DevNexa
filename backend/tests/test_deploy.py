@@ -198,3 +198,15 @@ def test_admin_key_required_when_set(client, monkeypatch):
     assert client.get("/api/apps").status_code == 401
     assert client.get("/api/apps", headers={"X-DevNexa-Key": "s3cret"}).status_code == 200
     assert client.get("/api/apps/config").json()["admin_required"] is True
+
+
+def test_pnpm_allows_dependency_build_scripts(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"build": "next build", "start": "next start"},
+                                                       "dependencies": {"next": "16"}}))
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    plan = buildplan.detect(tmp_path)
+    assert "pnpm install --frozen-lockfile --config.dangerously-allow-all-builds=true" in plan.generated
+    relaxed = buildplan.detect(tmp_path, {"npm_install": True})
+    assert "--no-frozen-lockfile" in relaxed.generated
+    diag = app_doctor.heuristic("build", "#8 7.154 Error: ERR_PNPM_IGNORED_BUILDS\n  Ignored build scripts: sharp@0.34.5")
+    assert diag["category"] == "pnpm_ignored_builds" and diag["action"] == "retry_deploy"
