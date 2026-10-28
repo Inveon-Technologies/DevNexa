@@ -48,7 +48,7 @@ services:
     image: caddy:2.8.4
     profiles: [https]
     environment:
-      DEVNEXA_DOMAIN: ${DEVNEXA_DOMAIN:?set DEVNEXA_DOMAIN in .env}
+      DEVNEXA_DOMAIN: ${DEVNEXA_DOMAIN:-localhost}
     depends_on: [frontend]
     ports: ["80:80", "443:443", "443:443/udp"]
     volumes:
