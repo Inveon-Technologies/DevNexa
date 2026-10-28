@@ -2,27 +2,37 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 
+from ..config import get_settings
 from ..models import Deployment, PipelineRun, StageRun, TestCase, TestExecution
 from ..services.analyzer import explain_ci_failure
 from ..services.audit import audit
+from ..services import github
 from ..services.feedback import changed_modules, pipeline_risk, prioritize_tests
 from ..simulation.catalog import CI_DEFECTS, FAULTS, SERVICE
+from . import realci
 from .context import STEP_SECONDS, RunContext, ctx_of
 
 STAGES = [("build", "Build Agent"), ("test", "Test Agent"), ("release", "Release Agent"),
           ("deploy", "Deployment Agent")]
 RELEASE_RISK_GATE = 0.85
+LOG_LINES = 300
 
 
 class PipelineState(TypedDict, total=False):
     run_id: int
     failed_stage: str | None
     deployment_id: int | None
+    real: bool          # live mode: real docker build / pytest / container swap
+    src: str
+    work: str | None
+    image: str
 
 
 def _stage(db, run: PipelineRun, name: str) -> StageRun:
@@ -63,6 +73,8 @@ def build_node(state: PipelineState, config) -> PipelineState:
         run = db.get(PipelineRun, state["run_id"])
         run.status, run.started_at = "running", run.started_at or ctx.clock.now()
         st = _start(ctx, db, run, "build")
+        if realci.enabled(ctx, run.injected_defect):
+            return _real_build(ctx, db, run, st)
         ctx.clock.advance(STEP_SECONDS["build"])
         logs = [f"$ git checkout {run.commit_sha[:7]}  ({run.branch})",
                 "$ pip install -r requirements.txt"]
@@ -81,11 +93,59 @@ def build_node(state: PipelineState, config) -> PipelineState:
     return {"failed_stage": None}
 
 
+def _real_build(ctx: RunContext, db, run: PipelineRun, st: StageRun) -> PipelineState:
+    logs: list[str] = []
+    try:
+        src, work = realci.checkout(run.id, run.repo, run.commit_sha, github.get_token(db), logs.append)
+    except FileNotFoundError as e:
+        logs.append(str(e))
+        _finish(ctx, st, False, logs, real=True)
+        _fail_run(ctx, db, run, "build", str(e))
+        return {"failed_stage": "build"}
+    ok, image, text = realci.build(src, run.commit_sha, logs.append)
+    if not ok:
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
+        _finish(ctx, st, False, logs[-LOG_LINES:], real=True)
+        _fail_run(ctx, db, run, "build", text[-15000:])
+        return {"failed_stage": "build"}
+    _finish(ctx, st, True, logs[-LOG_LINES:], image=image, modules=changed_modules(run.changed_files), real=True)
+    audit(db, "build-agent", "build.succeeded", "pipeline_run", run.id, f"Built {image} with docker")
+    return {"failed_stage": None, "real": True, "src": str(src), "work": str(work) if work else None,
+            "image": image}
+
+
+def _real_test(ctx: RunContext, db, run: PipelineRun, st: StageRun, state: PipelineState) -> PipelineState:
+    logs: list[str] = []
+    plan = prioritize_tests(db, run.changed_files)
+    logs.append("DevNexa test priority (from changed modules and verified incidents): "
+                + ", ".join(r["test"].id for r in plan if r["selected"]))
+    try:
+        ok, text, summary = realci.test(Path(state["src"]), state["image"], logs.append)
+    finally:
+        if state.get("work"):
+            shutil.rmtree(state["work"], ignore_errors=True)
+    total = summary["passed"] + summary["failed"] + summary["error"] + summary["skipped"]
+    details = dict(selected=total, total=total, duration_s=summary["duration_s"],
+                   full_suite_s=summary["duration_s"], failed=summary["failed"] + summary["error"],
+                   failed_tests=summary["failed_tests"], real=True,
+                   priority_plan=[r["test"].id for r in plan if r["selected"]])
+    if not ok:
+        _finish(ctx, st, False, logs[-LOG_LINES:], **details)
+        _fail_run(ctx, db, run, "test", text[-15000:])
+        return {"failed_stage": "test"}
+    _finish(ctx, st, True, logs[-LOG_LINES:], **details)
+    audit(db, "test-agent", "tests.passed", "pipeline_run", run.id, f"pytest: {summary['passed']} passed")
+    return {"failed_stage": None}
+
+
 def test_node(state: PipelineState, config) -> PipelineState:
     ctx = ctx_of(config)
     with ctx.session() as db:
         run = db.get(PipelineRun, state["run_id"])
         st = _start(ctx, db, run, "test")
+        if state.get("real"):
+            return _real_test(ctx, db, run, st, state)
         if run.test_strategy == "full":
             ranked = [{"test": t, "score": 0.0, "reasons": ["full suite"], "selected": True}
                       for t in db.scalars(select(TestCase).order_by(TestCase.module, TestCase.id))]
@@ -175,17 +235,29 @@ def deploy_node(state: PipelineState, config) -> PipelineState:
         n = db.query(Deployment).count()
         version = f"v1.4.{n + 1}"
         image = f"devnexa/sample-app:{run.commit_sha[:7]}"
-        ctx.env.deploy(version, image, run.commit_sha, run.injected_defect)
-        ctx.clock.advance(STEP_SECONDS["deploy"])
-        checks = ctx.env.health()
-        live = checks[0]["passed"]
+        container = get_settings().sample_app_container
+        prev_image = None
+        if state.get("real"):
+            image = state["image"]
+            prev_image = realci.current_image(container)
+            logs = []
+            swapped, _ = realci.swap(container, image, logs.append)
+            up = swapped and realci.wait_ready()
+            if up:
+                ctx.env.deploy(version, image, run.commit_sha, None)
+            live = up and ctx.env.health()[0]["passed"]
+            logs += [f"Deployed {version} ({image}) to {container}", f"Post-deploy liveness: {'up' if live else 'DOWN'}"]
+        else:
+            ctx.env.deploy(version, image, run.commit_sha, run.injected_defect)
+            ctx.clock.advance(STEP_SECONDS["deploy"])
+            live = ctx.env.health()[0]["passed"]
+            logs = [f"$ docker compose up -d sample-app  # {image}", f"Deployed {version} to staging",
+                    f"Post-deploy liveness: {'up' if live else 'DOWN'}"]
         dep = Deployment(run_id=run.id, service=SERVICE, version=version, image=image, commit_sha=run.commit_sha,
                          status="active" if live else "failed", health="healthy" if live else "unhealthy",
                          is_stable=False, deployed_at=ctx.clock.now())
         db.add(dep)
         db.flush()
-        logs = [f"$ docker compose up -d sample-app  # {image}", f"Deployed {version} to staging",
-                f"Post-deploy liveness: {'up' if live else 'DOWN'}"]
         if live:
             if prev:
                 prev.status = "superseded"
@@ -195,7 +267,13 @@ def deploy_node(state: PipelineState, config) -> PipelineState:
             audit(db, "deployment-agent", "deploy.succeeded", "deployment", dep.id, f"{version} deployed ({image})")
         else:
             # Automatic rollback when the new release does not even come up.
-            if prev:
+            if state.get("real") and prev_image:
+                realci.swap(container, prev_image, logs.append)
+                realci.wait_ready()
+                logs.append(f"Liveness failed: rolled back to {prev_image}")
+                if prev:
+                    ctx.env.rollback(prev.version, prev.image, prev.commit_sha)
+            elif prev:
                 ctx.env.rollback(prev.version, prev.image, prev.commit_sha)
                 logs.append(f"Liveness failed: rolled back to {prev.version}")
             dep.status = "rolled_back"

@@ -43,7 +43,7 @@ def change_evidence(db: Session, now: datetime) -> list[dict]:
     runs = db.scalars(select(PipelineRun).order_by(PipelineRun.id.desc()).limit(5)).all()
     deps = db.scalars(select(Deployment).order_by(Deployment.id.desc()).limit(5)).all()
     out = [{
-        "kind": "commit", "source": "github", "title": f"Recent commits ({len(runs)})",
+        "kind": "commit", "source": "devnexa", "title": f"Recent pipeline commits ({len(runs)})",
         "content": {"commits": [{
             "sha": r.commit_sha[:7], "message": r.commit_message, "author": r.author,
             "files": r.changed_files, "branch": r.branch, "time": _iso(r.created_at),
@@ -223,7 +223,27 @@ def live_evidence(db: Session, incident: Incident) -> list[dict]:  # pragma: no 
         evidence.append({"kind": "trace", "source": "jaeger", "title": "Jaeger unavailable",
                          "content": {"error": str(e), "traces": []}})
 
-    return evidence + change_evidence(db, now)
+    return evidence + git_evidence(db) + change_evidence(db, now)
+
+
+def git_evidence(db: Session) -> list[dict]:  # pragma: no cover - needs GitHub
+    """Real commit history of the monitored service's repo (DEVNEXA_GITHUB_REPO), when GitHub is connected."""
+    from . import github
+
+    s = get_settings()
+    token = github.get_token(db)
+    if not (s.github_repo and token):
+        return []
+    try:
+        commits = github.recent_commits(token, s.github_repo)
+    except github.GitHubError as e:
+        return [{"kind": "commit", "source": "github", "title": "GitHub commits unavailable",
+                 "content": {"error": str(e), "commits": []}}]
+    prefix = f"{s.sample_app_subdir}/" if s.sample_app_subdir else ""
+    for c in commits:  # paths relative to the service, as the analyzer's module map expects
+        c["files"] = [f.removeprefix(prefix) for f in c["files"]]
+    return [{"kind": "commit", "source": "github", "title": f"Recent commits on {s.github_repo} ({len(commits)})",
+             "content": {"commits": commits, "repo": s.github_repo}}]
 
 
 def symptom_text(incident: Incident, evidence: list[dict]) -> str:

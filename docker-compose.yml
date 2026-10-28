@@ -32,6 +32,10 @@ services:
       DEVNEXA_LLM_BASE_URL: ${DEVNEXA_LLM_BASE_URL:-}
       DEVNEXA_GITHUB_WEBHOOK_SECRET: ${DEVNEXA_GITHUB_WEBHOOK_SECRET:-}
       DEVNEXA_SAMPLE_APP_CONTAINER: devnexa-sample-app
+      # Live pipelines really build, test and deploy the sample app: from the pushed commit of this repo when
+      # GitHub triggers them, otherwise from the checkout mounted below. Also the repo for incident commit evidence.
+      DEVNEXA_SAMPLE_APP_SRC: /workspace/sample-app
+      DEVNEXA_GITHUB_REPO: ${DEVNEXA_GITHUB_REPO:-Inveon-Technologies/DevNexa}
       # Deploy from GitHub: the admin key unlocks it in the dashboard. With DEVNEXA_APPS_DOMAIN set (needs a
       # wildcard DNS record *.<domain>), apps get https://<app>.<domain>; otherwise http://<host>:20000-20999.
       DEVNEXA_ADMIN_TOKEN: ${DEVNEXA_ADMIN_TOKEN:-}
@@ -44,6 +48,7 @@ services:
     ports: ["8000:8000"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./sample-app:/workspace/sample-app:ro
     <<: *logs
 
   frontend:
