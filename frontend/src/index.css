@@ -10,11 +10,11 @@
 }
 
 @layer components {
-  .card { @apply min-w-0 rounded-2xl border border-white/[0.06] bg-ink-900/70 backdrop-blur-sm; }
+  .card { @apply min-w-0 rounded-2xl border border-white/[0.06] bg-ink-900; }
   .card-pad { @apply p-5; }
   .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition
     disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60; }
-  .btn-primary { @apply btn bg-indigo-500 text-white hover:bg-indigo-400 shadow-glow; }
+  .btn-primary { @apply btn bg-indigo-500 text-white hover:bg-indigo-400; }
   .btn-ghost { @apply btn border border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.07]; }
   .btn-danger { @apply btn border border-rose-500/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20; }
   .btn-success { @apply btn bg-emerald-500 text-emerald-950 hover:bg-emerald-400; }
