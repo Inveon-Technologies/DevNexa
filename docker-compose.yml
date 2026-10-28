@@ -1,5 +1,6 @@
 # DevNexa full stack. `docker compose up --build`, then open http://localhost:5173
 # DEVNEXA_MODE=simulated runs the agents against the in-memory model instead of the live sample app.
+# On a server with a domain: set DEVNEXA_DOMAIN in .env and add `--profile https` for automatic HTTPS.
 name: devnexa
 
 x-logs: &logs
@@ -42,6 +43,19 @@ services:
     build: ./frontend
     depends_on: [backend]
     ports: ["5173:80"]
+
+  caddy:
+    image: caddy:2.8.4
+    profiles: [https]
+    environment:
+      DEVNEXA_DOMAIN: ${DEVNEXA_DOMAIN:-localhost}
+    depends_on: [frontend]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
 
   sample-app:
     build: ./sample-app
@@ -103,3 +117,5 @@ services:
 volumes:
   pgdata:
   sampledata:
+  caddy_data:
+  caddy_config:
