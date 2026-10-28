@@ -1,5 +1,5 @@
 import {
-  Activity, BookOpenCheck, Boxes, FlaskConical, FlaskRound, GitBranch, Gauge, Layers, ListChecks, Menu,
+  Activity, BookOpenCheck, Boxes, FlaskConical, FlaskRound, GitBranch, Gauge, Github, Layers, ListChecks, Menu,
   Rocket, ScrollText, ShieldCheck, Siren, UserCheck, X,
 } from "lucide-react";
 import { useState } from "react";
@@ -7,7 +7,13 @@ import { NavLink, useLocation } from "react-router-dom";
 import { usePoll } from "../hooks";
 
 const NAV = [
-  { group: "Overview", items: [{ to: "/", label: "Command center", icon: Gauge }] },
+  {
+    group: "Overview",
+    items: [
+      { to: "/", label: "Command center", icon: Gauge },
+      { to: "/deploy", label: "Deploy from GitHub", icon: Github },
+    ],
+  },
   {
     group: "Delivery",
     items: [
