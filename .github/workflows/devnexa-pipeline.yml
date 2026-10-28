@@ -46,17 +46,30 @@ jobs:
           set -o pipefail
           pytest -q 2>&1 | tee ../test.log
 
+      - name: Release readiness
+        id: release
+        run: |
+          set -o pipefail
+          {
+            echo "build: ${{ steps.build.outcome }}"
+            echo "tests: ${{ steps.test.outcome }}"
+            docker image inspect devnexa/sample-app:${GITHUB_SHA::7} --format 'image: {{.Id}} ({{.Size}} bytes)'
+            echo "Release ready: devnexa/sample-app:${GITHUB_SHA::7}"
+            echo "Deployment runs on the DevNexa server when it receives the push webhook."
+          } 2>&1 | tee release.log
+
       - name: Report to DevNexa
         if: always() && env.DEVNEXA_URL != ''
         env:
           BUILD: ${{ steps.build.outcome }}
           TEST: ${{ steps.test.outcome }}
+          RELEASE: ${{ steps.release.outcome }}
           FILES: ${{ steps.changes.outputs.files }}
           MSG: ${{ github.event.head_commit.message }}
         run: |
           python - <<'PY'
           import json, os, urllib.request
-          def report(stage, outcome, logfile):
+          def report(stage, outcome, logfile, final=False):
               if outcome in ("", "skipped"):
                   return
               log = open(logfile).read()[-15000:] if os.path.exists(logfile) else ""
@@ -65,7 +78,7 @@ jobs:
                       "message": (os.environ.get("MSG") or "").splitlines()[0] if os.environ.get("MSG") else "",
                       "files": [f for f in os.environ.get("FILES", "").split(",") if f],
                       "repo": os.environ["GITHUB_REPOSITORY"], "stage": stage,
-                      "status": "success" if outcome == "success" else "failed", "log": log}
+                      "status": "success" if outcome == "success" else "failed", "log": log, "final": final}
               req = urllib.request.Request(os.environ["DEVNEXA_URL"] + "/api/webhooks/github/actions",
                                            data=json.dumps(body).encode(), method="POST",
                                            headers={"Content-Type": "application/json",
@@ -73,4 +86,5 @@ jobs:
               print(stage, urllib.request.urlopen(req).read().decode())
           report("build", os.environ["BUILD"], "build.log")
           report("test", os.environ["TEST"], "test.log")
+          report("release", os.environ["RELEASE"], "release.log", final=True)
           PY

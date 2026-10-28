@@ -9,12 +9,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..agents import deploy, runner
 from ..agents.cicd import STAGES, create_run
 from ..agents.monitoring import ingest_alerts
 from ..agents.runner import start_incident, start_pipeline
 from ..config import get_settings
 from ..db import get_db
-from ..models import PipelineRun, StageRun
+from ..models import AppDeployment, PipelineRun, StageRun
 from ..services.analyzer import explain_ci_failure
 from ..services.audit import audit
 
@@ -33,7 +34,8 @@ def _verify_signature(body: bytes, signature: str | None):
 @router.post("/github")
 async def github_push(request: Request, x_github_event: str = Header("push"),
                       x_hub_signature_256: str | None = Header(None), db: Session = Depends(get_db)):
-    """GitHub push webhook -> DevNexa simulated pipeline for the pushed commit."""
+    """GitHub push webhook. Apps deployed from the pushed repo and branch are redeployed; otherwise the push
+    runs the DevNexa pipeline (real docker build, pytest and deploy of the sample app in live mode)."""
     body = await request.body()
     _verify_signature(body, x_hub_signature_256)
     if x_github_event == "ping":
@@ -41,6 +43,13 @@ async def github_push(request: Request, x_github_event: str = Header("push"),
     if x_github_event != "push":
         return {"ok": True, "ignored": x_github_event}
     payload = await request.json()
+    redeploys = redeploy_pushed_apps(db, (payload.get("repository") or {}).get("full_name", ""),
+                                     (payload.get("ref") or "").split("/")[-1])
+    if redeploys:
+        db.commit()
+        for dep_id in redeploys:
+            runner.submit(deploy.run_deploy, dep_id)
+        return {"ok": True, "redeploys": redeploys}
     head = payload.get("head_commit") or {}
     files = sorted({f for c in payload.get("commits", []) for k in ("added", "modified", "removed") for f in c.get(k, [])})
     run = create_run(db, commit_sha=head.get("id") or payload.get("after", "0" * 40),
@@ -53,8 +62,23 @@ async def github_push(request: Request, x_github_event: str = Header("push"),
     return {"ok": True, "run_id": run.id}
 
 
+def redeploy_pushed_apps(db: Session, repo: str, branch: str) -> list[int]:
+    """Continuous deployment: every app running from the pushed repo and branch is rebuilt and redeployed."""
+    if not repo or not branch:
+        return []
+    running = db.scalars(select(AppDeployment).where(AppDeployment.repo == repo, AppDeployment.branch == branch,
+                                                     AppDeployment.status == "running")).all()
+    ids = []
+    for d in {d.app: d for d in sorted(running, key=lambda d: d.id)}.values():
+        opts = {k: v for k, v in (d.options or {}).items() if k != "reuse_image"}
+        new = deploy.create_deployment(db, d.repo, d.branch, d.app, d.root_dir, dict(d.env or {}), opts,
+                                       actor="github-push")
+        ids.append(new.id)
+    return ids
+
+
 class StageReport(BaseModel):
-    """Posted by .github/workflows/devnexa-ci.yml after each real CI stage."""
+    """Posted by .github/workflows/devnexa-pipeline.yml after each real CI stage."""
 
     run_key: str                 # e.g. "<github run id>-<attempt>"
     commit_sha: str
@@ -67,6 +91,7 @@ class StageReport(BaseModel):
     log: str = ""
     details: dict = {}
     repo: str = ""
+    final: bool = False          # last stage this CI reports: on success the run is complete
 
 
 @router.post("/github/actions")
@@ -96,8 +121,11 @@ def github_actions_report(rep: StageReport, x_devnexa_token: str | None = Header
             if x.status == "pending":
                 x.status = "skipped"
         audit(db, "github-actions", "pipeline.failed", "pipeline_run", run.id, f"{rep.stage} failed in GitHub Actions")
-    elif rep.status == "success" and rep.stage == STAGES[-1][0]:
+    elif rep.status == "success" and (rep.final or rep.stage == STAGES[-1][0]):
         run.status, run.finished_at, run.current_stage = "success", now, None
+        for x in run.stages:
+            if x.status in ("pending", "running"):
+                x.status = "skipped"
     db.commit()
     return {"ok": True, "run_id": run.id, "ai_feedback": run.ai_feedback}
 

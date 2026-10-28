@@ -128,3 +128,21 @@ def open_fix_pr(token: str, full_name: str, base_branch: str, base_sha: str, fil
     if pr.status_code != 201:
         raise GitHubError(f"Could not open the pull request: GitHub {pr.status_code} {pr.text[:200]}")
     return pr.json()["html_url"]
+
+
+def recent_commits(token: str, full_name: str, branch: str = "", limit: int = 5) -> list[dict]:
+    """The latest commits of a repo with their changed files (incident change evidence)."""
+    params = {"per_page": limit, **({"sha": branch} if branch else {})}
+    r = _call(token, "GET", f"/repos/{full_name}/commits", params=params)
+    if r.status_code != 200:
+        raise GitHubError(f"GitHub returned {r.status_code} listing commits of {full_name}.", r.status_code)
+    out = []
+    for c in r.json()[:limit]:
+        d = _call(token, "GET", f"/repos/{full_name}/commits/{c['sha']}")
+        files = [f["filename"] for f in d.json().get("files", [])] if d.status_code == 200 else []
+        info = c.get("commit") or {}
+        out.append({"sha": c["sha"][:7], "message": (info.get("message") or "").splitlines()[0][:200],
+                    "author": (c.get("author") or {}).get("login") or (info.get("author") or {}).get("name"),
+                    "time": (info.get("author") or {}).get("date"), "files": files,
+                    "url": c.get("html_url")})
+    return out

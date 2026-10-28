@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     jaeger_url: str = "http://jaeger:16686"
     sample_app_container: str = "devnexa-sample-app"
     sample_app_image: str = "devnexa/sample-app"
+    # Live pipelines build and test this checkout (or the pushed commit's `sample_app_subdir` when GitHub triggered it).
+    sample_app_src: str = ""
+    sample_app_subdir: str = "sample-app"
 
     github_webhook_secret: str = ""
     github_token: str = ""

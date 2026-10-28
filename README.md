@@ -21,7 +21,8 @@ prioritisation and release risk.
 | Graded autonomy and approvals (low / medium / high risk) | `backend/app/services/policy.py`, Approvals + Risk policy pages |
 | Remediation and health verification | `backend/app/services/environment.py`, `verify` node in the incident graph |
 | Feedback Engine (verified memory, module risk, regression tests, test prioritisation) | `backend/app/services/feedback.py` |
-| Fault-injection evaluation vs a conventional baseline | `backend/app/evaluation/runner.py`, Evaluation page |
+| Fault-injection evaluation vs a conventional baseline | `backend/app/evaluation/runner.py`, Evaluation page, results in [docs/evaluation-report.md](docs/evaluation-report.md) |
+| Real build, test and deploy in live mode (docker build, pytest in the image, container swap with rollback) | `backend/app/agents/realci.py` |
 | Audit log of every agent decision | `backend/app/services/audit.py`, Audit page |
 | Dashboard (React, Vite, Tailwind CSS, Recharts) | `frontend/` |
 
@@ -153,10 +154,21 @@ If the LLM call fails, the analyzer falls back to the offline scorer and records
 ## Connecting GitHub
 
 * **Webhook**: add a repository webhook (push events) pointing at `https://<devnexa>/api/webhooks/github` with
-  the shared secret. Each push becomes a DevNexa pipeline run.
+  the shared secret. If the pushed repo and branch have an app running from **Deploy from GitHub**, the push
+  rebuilds and redeploys it (continuous deployment). Otherwise the push becomes a DevNexa pipeline run. In live mode
+  that run is real:
+  * the Build Agent fetches the pushed commit and runs `docker build` on `sample-app/`;
+  * the Test Agent runs its pytest suite inside the new image;
+  * the Deployment Agent replaces the `devnexa-sample-app` container with the new image, and puts the previous
+    image back if the new one fails its health check.
+
+  Fault Lab runs stay simulated.
 * **GitHub Actions**: add `DEVNEXA_URL` and `DEVNEXA_TOKEN` repository secrets. `devnexa-pipeline.yml` asks DevNexa
-  for a prioritised test plan, runs the real build and tests of `sample-app/`, and reports each stage; failures get
-  an AI explanation in the dashboard.
+  for a prioritised test plan, runs the real build and tests of `sample-app/`, checks release readiness, and
+  reports build, test and release (the last one completes the run). Failures get an AI explanation in the dashboard.
+* **Commit evidence**: with GitHub connected (the Deploy page or `DEVNEXA_GITHUB_TOKEN`) and `DEVNEXA_GITHUB_REPO`
+  set (compose defaults it to this repo), incidents include the repo's latest real commits and the files they
+  changed.
 
 ## How the incident workflow decides
 
