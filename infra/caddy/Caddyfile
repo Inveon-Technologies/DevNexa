@@ -1,0 +1,6 @@
+# HTTPS front door for a public deployment. Caddy fetches and renews a Let's Encrypt
+# certificate for DEVNEXA_DOMAIN and redirects plain HTTP to HTTPS.
+{$DEVNEXA_DOMAIN} {
+	encode gzip
+	reverse_proxy frontend:80
+}
