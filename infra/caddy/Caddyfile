@@ -1,6 +1,27 @@
 # HTTPS front door for a public deployment. Caddy fetches and renews a Let's Encrypt
 # certificate for DEVNEXA_DOMAIN and redirects plain HTTP to HTTPS.
+{
+	# Apps deployed from GitHub live at https://<app>.<domain>. Certificates are issued on demand,
+	# and only for app names the DevNexa backend knows about.
+	on_demand_tls {
+		ask http://backend:8000/api/apps/tls-check
+	}
+}
+
 {$DEVNEXA_DOMAIN} {
 	encode gzip
 	reverse_proxy frontend:80
+}
+
+*.{$DEVNEXA_DOMAIN} {
+	tls {
+		on_demand
+	}
+	encode gzip
+	# The backend answers which container serves this hostname (or a "not deployed" page).
+	forward_auth backend:8000 {
+		uri /api/apps/route
+		copy_headers X-Devnexa-Upstream
+	}
+	reverse_proxy {http.request.header.X-Devnexa-Upstream}
 }

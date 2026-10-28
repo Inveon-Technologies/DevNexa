@@ -44,6 +44,22 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_repo: str = ""
 
+    # Deploying user repos ("Deploy from GitHub"). The admin token guards the GitHub and app-deploy APIs:
+    # in live mode they refuse to work until it is set, because a deploy runs arbitrary code on the host.
+    admin_token: str = ""
+    # Apps are served at https://<app>.<apps_domain> through Caddy. Empty: publish a host port instead.
+    apps_domain: str = ""
+    apps_public_host: str = "localhost"
+    apps_host_port_base: int = 20000
+    apps_network: str = "devnexa_default"
+    apps_workdir: str = "/tmp/devnexa-apps"
+    apps_memory: str = "512m"
+    apps_cpus: str = "1.0"
+    apps_build_timeout: int = 900
+    apps_health_timeout: int = 60
+    apps_monitor_interval: float = 15.0
+    apps_max_auto_restarts: int = 3
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

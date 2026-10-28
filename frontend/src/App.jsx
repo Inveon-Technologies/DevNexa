@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import Approvals from "./pages/Approvals";
 import Audit from "./pages/Audit";
+import Deploy from "./pages/Deploy";
 import Deployments from "./pages/Deployments";
 import Evaluation from "./pages/Evaluation";
 import FaultLab from "./pages/FaultLab";
@@ -20,6 +21,7 @@ export default function App() {
     <Layout>
       <Routes>
         <Route path="/" element={<Overview />} />
+        <Route path="/deploy" element={<Deploy />} />
         <Route path="/pipelines" element={<Pipelines />} />
         <Route path="/pipelines/:id" element={<PipelineDetail />} />
         <Route path="/tests" element={<Tests />} />

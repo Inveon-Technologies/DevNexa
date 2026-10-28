@@ -337,3 +337,39 @@ class KeyValue(Base):
 
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ------------------------------------------------------ user repo deployments
+class AppDeployment(Base):
+    """One deploy of a user's GitHub repo as a container, with its logs, health and agent findings."""
+
+    __tablename__ = "app_deployments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    repo: Mapped[str] = mapped_column(String(200))
+    branch: Mapped[str] = mapped_column(String(120), default="main")
+    root_dir: Mapped[str] = mapped_column(String(200), default="")
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    commit_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    health: Mapped[str] = mapped_column(String(20), default="unknown")
+    build_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    image: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    container: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    env: Mapped[dict] = mapped_column(JSON, default=dict)
+    options: Mapped[dict] = mapped_column(JSON, default=dict)
+    build_log: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagnosis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    remediations: Mapped[list] = mapped_column(JSON, default=list)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    restarts: Mapped[int] = mapped_column(Integer, default=0)
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    triggered_by: Mapped[str] = mapped_column(String(120), default="operator")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

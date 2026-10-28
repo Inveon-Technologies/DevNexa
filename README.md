@@ -88,6 +88,48 @@ The `caddy` service obtains and renews a Let's Encrypt certificate and redirects
 no login of its own, so only expose ports 80 and 443 publicly and keep the others (5432, 8000, 3000, 9090, …)
 closed in the server's firewall or cloud security group.
 
+## Deploy from GitHub (any repo, live URL, live logs)
+
+The **Deploy from GitHub** page lets you connect a GitHub account, pick one of your repositories and a branch, and
+deploy it as a container on the DevNexa server:
+
+1. **Clone** the branch with your token (the token is masked in every log line).
+2. **Detect** how to build it: the repo's own `Dockerfile`, or a generated one for Node (Express/Next, or Vite/CRA
+   served by nginx), Python (FastAPI, Flask, Django, Streamlit, plain script), Go, or a static `index.html` site.
+3. **Build** with `docker build` and **start** the container on the compose network with memory/CPU limits.
+4. **Health-check** it over HTTP, then switch the app's URL to the new container (blue/green: the previous version
+   keeps serving until the new one is healthy, then it is removed).
+
+Build output and the running app's `docker logs` stream live to the page (server-sent events). The Monitoring
+Agent probes every running app every 15 s (HTTP status, latency, CPU, memory, error lines in the logs).
+
+When a deploy or a running app fails, the Deploy Agent follows the same loop as the incident workflow:
+**diagnose** (known failure patterns + the configured LLM, with the log evidence and key repo files), **recall**
+similar past fixes, apply **graded remediation** and **verify**, then **learn** the outcome:
+
+| Risk | Runs | Examples |
+| --- | --- | --- |
+| Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space |
+| Medium | after approval | double the memory limit after an out-of-memory kill, roll back to the last healthy image |
+| High | after approval | open a pull request on your repo with the proposed code fix (e.g. add the missing package to `requirements.txt` / `package.json`, or an LLM-written patch) |
+
+### Turning it on (server)
+
+```bash
+# .env next to docker-compose.yml
+DEVNEXA_ADMIN_TOKEN=<long random string>   # required: deploys run code on your server
+DEVNEXA_DOMAIN=devnexa.example.com
+DEVNEXA_APPS_DOMAIN=devnexa.example.com    # apps at https://<app>.devnexa.example.com
+```
+
+* Add a **wildcard DNS record** `*.devnexa.example.com` (A record) pointing at the same server IP.
+  Caddy then issues a certificate per app on first visit, only for app names DevNexa knows.
+* `docker compose --profile https up -d --build`, open the dashboard, enter the admin key, and paste a GitHub token
+  (classic token with the `repo` scope, or a fine-grained token with *Contents: read & write* and
+  *Pull requests: read & write* for the repos you want; write access is only used for approved fix PRs).
+* Without `DEVNEXA_APPS_DOMAIN`, each app is published on a host port instead (`http://<domain>:20000-20999`),
+  which needs those ports open in the firewall.
+
 ## Configuration
 
 All settings are environment variables with the `DEVNEXA_` prefix (see `backend/.env.example`).
@@ -101,6 +143,10 @@ All settings are environment variables with the `DEVNEXA_` prefix (see `backend/
 | `DEVNEXA_GITHUB_WEBHOOK_SECRET` | | HMAC secret for `/api/webhooks/github` and token for the Actions reporter |
 | `DEVNEXA_SIM_STEP_DELAY` | `0.8` | Seconds per simulated step, so progress is visible in the UI |
 | `DEVNEXA_EMBEDDING_PROVIDER` | `hashing` | `sentence-transformers` if installed |
+| `DEVNEXA_ADMIN_TOKEN` | | Unlocks the Deploy from GitHub page and API (required in live mode) |
+| `DEVNEXA_APPS_DOMAIN` | | Serve deployed apps at `https://<app>.<domain>` (needs wildcard DNS) |
+| `DEVNEXA_GITHUB_TOKEN` | | Optional default GitHub token (otherwise connect one in the dashboard) |
+| `DEVNEXA_APPS_MEMORY` / `DEVNEXA_APPS_CPUS` | `512m` / `1.0` | Resource limits per deployed app |
 
 If the LLM call fails, the analyzer falls back to the offline scorer and records that in the diagnosis.
 
