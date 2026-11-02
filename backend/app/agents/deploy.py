@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import session_scope
-from ..models import AppDeployment, AppIssue
+from ..models import AppDeployment, AppIssue, KeyValue
 from ..services import app_doctor, buildplan, github, issues, policy, releases
 from ..services.audit import audit
 
@@ -159,9 +159,9 @@ def run_deploy(dep_id: int) -> None:
     s = get_settings()
     with session_scope() as db:
         dep = db.get(AppDeployment, dep_id)
-        token = github.get_token(db)
         repo, branch, app, root_dir = dep.repo, dep.branch, dep.app, dep.root_dir
         env, options = dict(dep.env or {}), dict(dep.options or {})
+        token = github.get_token(db, options.get("gh_user"))
         dep.started_at = now()
     out = DeployLog(dep_id, [token])
     work = Path(s.apps_workdir) / str(dep_id)
@@ -215,6 +215,8 @@ def run_deploy(dep_id: int) -> None:
 
         _start_and_verify(dep_id, app, image, plan_port, kind, env, options, out)
         out.step("Deployed")
+        if plan and plan.generated and not options.get("fix_for"):
+            dockerize_pr(dep_id, plan, root / ".dockerignore", out)
     except DeployFailed as e:
         if e.stage == "start" and e.output:
             for ln in e.output.splitlines()[-80:]:
@@ -322,6 +324,8 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
         executor.run(["docker", "rm", "-f", c])
     out(f"[url] {public_url(app, host_port)}")
     releases.on_live(dep_id, env, options)
+    if options.get("fix_for"):
+        finish_fix(dep_id, ok=True, out=out)
 
 
 def _verify_parent(db, parent: AppDeployment, detail: str):
@@ -337,7 +341,9 @@ def _fail(dep_id: int, stage: str, message: str, output: str, work: Path):
     with session_scope() as db:
         dep = db.get(AppDeployment, dep_id)
         dep.status, dep.health, dep.error, dep.finished_at = "failed", "down", message, now()
-        diag = app_doctor.diagnose(db, stage, output or message, work / dep.root_dir if work.exists() else None)
+        is_fix_check = bool((dep.options or {}).get("fix_for"))
+        diag = app_doctor.diagnose(db, stage, output or message, work / dep.root_dir if work.exists() else None,
+                                   build_kind=dep.build_kind)
         dep.diagnosis = diag
         audit(db, "deploy-agent", "app.failed", "app_deployment", dep_id, f"{stage} failed: {diag['title']}")
         parent = db.get(AppDeployment, dep.parent_id) if dep.parent_id else None
@@ -348,6 +354,9 @@ def _fail(dep_id: int, stage: str, message: str, output: str, work: Path):
                     r.update(status="failed", detail=r.get("detail", "") + f" · deploy #{dep_id} failed again")
                     app_doctor.remember(db, parent.diagnosis, parent.repo, r["action"], "did_not_fix")
             parent.remediations = rems
+    if is_fix_check:  # the agent's own fix branch failed its check: report it, do not stack more fixes
+        finish_fix(dep_id, ok=False)
+        return
     remediate(dep_id)
 
 
@@ -393,6 +402,10 @@ def remediate(dep_id: int, diag: dict | None = None) -> None:
         if spec.risk == "low" and spec.allowlisted and auto["auto_execute_low"] \
                 and diag["confidence"] >= auto["min_confidence_for_auto"] and _auto_depth(db, dep) < 2:
             decision, reason = "auto_execute", "Low-risk allowlisted fix: running automatically."
+        elif action == "open_fix_pr" and diag.get("patch") and auto.get("auto_fix_branch", True) \
+                and _auto_depth(db, dep) < 2:
+            decision, reason = "auto_execute", ("Code fix: pushed to a new branch and checked on a preview URL "
+                                                "first. Merging the pull request stays with you.")
         elif spec.risk == "low" and action == "escalate":
             decision, reason = "auto_execute", "No safe automatic fix: evidence handed to a developer."
         elif spec.risk == "low":
@@ -452,7 +465,8 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
         elif action == "escalate":
             result = {"status": "escalated", "detail": "Developer needs to act; diagnosis and log evidence attached."}
         container, repo, branch, sha, app = dep.container, dep.repo, dep.branch, dep.commit_sha, dep.app
-        token = github.get_token(db)
+        root_dir = dep.root_dir
+        token = github.get_token(db, options.get("gh_user"))
         new_id = new.id if new else None
 
     if action == "prune_docker":
@@ -467,17 +481,24 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
             if code == 0:
                 d.status, d.health = "running", "recovering"
     if action == "open_fix_pr" and diag.get("patch"):
+        fix_branch = f"devnexa/fix-{app}-{dep_id}"
+        files = {(f"{root_dir}/{p}" if root_dir else p): c for p, c in diag["patch"].items()}
         try:
-            url = github.open_fix_pr(
-                token, repo, branch, sha, diag["patch"], title=f"fix: {diag['title']} (DevNexa)",
-                branch=f"devnexa/fix-{app}-{dep_id}",
-                body=f"DevNexa's Deploy Agent proposes this change after deploy #{dep_id} failed.\n\n"
-                     f"**Root cause:** {diag['root_cause']}\n\n**Suggestion:** {diag['suggestion']}\n\n"
-                     f"**Confidence:** {diag['confidence']:.2f} ({diag.get('provider')})\n\n"
-                     "```\n" + "\n".join(diag.get("evidence", [])[:12]) + "\n```\n\nApproved by " + actor + ".")
-            result = {"status": "executed", "detail": "Pull request opened", "pr_url": url}
+            base_sha = sha or github.branch_sha(token, repo, branch)
+            github.push_branch(token, repo, base_sha, files, fix_branch)
         except github.GitHubError as e:
-            result = {"status": "failed", "detail": str(e)}
+            result = {"status": "failed", "detail": f"Could not push the fix branch: {e}"}
+        else:
+            with session_scope() as db:
+                d = db.get(AppDeployment, dep_id)
+                opts = {k: v for k, v in (d.options or {}).items() if k != "reuse_image"}
+                opts["fix_for"] = {"dep": dep_id, "rem": rem_id, "base": branch, "branch": fix_branch}
+                preview = create_deployment(db, repo, fix_branch, f"{app}-fix-{dep_id}", root_dir,
+                                            dict(d.env or {}), opts, parent_id=dep_id, actor=actor)
+                new_id = preview.id
+            result = {"detail": f"Fix pushed to branch {fix_branch}; checking it on preview deploy #{new_id}. "
+                                "The pull request opens once the preview is healthy.",
+                      "branch": fix_branch, "preview_id": new_id}
     result.setdefault("status", "executed")
     _set_rem(dep_id, rem_id, executed_at=now().isoformat(), decided_by=actor, **result)
     if new_id:
@@ -500,6 +521,97 @@ def decide(dep_id: int, rem_id: int, approve: bool, actor: str) -> dict:
         return {"status": "rejected"}
     _set_rem(dep_id, rem_id, status="running", decided_by=actor)
     return execute(dep_id, rem_id, actor)
+
+
+DOCKERIGNORE = ".git\nnode_modules\n.env\n.env.*\n__pycache__\n*.pyc\n.venv\nvenv\n"
+
+
+def _pr_body(intro: str, rows: list[tuple[str, str]], footer: str = "") -> str:
+    lines = [intro, ""] + [f"**{k}:** {v}" for k, v in rows if v]
+    return "\n\n".join(lines) + (f"\n\n{footer}" if footer else "") + \
+        "\n\n---\n_Opened by the DevNexa Deploy Agent. Nothing merges until you approve it._"
+
+
+def dockerize_pr(dep_id: int, plan, dockerignore: Path, out: DeployLog | None = None) -> None:
+    """The repo had no Dockerfile and the deploy just worked with a generated one: offer it to the repo
+    on a new branch, so the repo builds the same way anywhere. Once per repo/branch/folder."""
+    with session_scope() as db:
+        dep = db.get(AppDeployment, dep_id)
+        if not policy.get_autonomy(db).get("auto_fix_branch", True):
+            return
+        key = f"{dep.repo}@{dep.branch}:{dep.root_dir}"
+        done = db.get(KeyValue, "dockerize_prs")
+        if done and key in done.value:
+            return
+        repo, branch, sha, app, root_dir = dep.repo, dep.branch, dep.commit_sha, dep.app, dep.root_dir
+        token = github.get_token(db, (dep.options or {}).get("gh_user"))
+    prefix = f"{root_dir}/" if root_dir else ""
+    files = {f"{prefix}Dockerfile": plan.generated}
+    if not dockerignore.exists():
+        files[f"{prefix}.dockerignore"] = DOCKERIGNORE
+    fix_branch = f"devnexa/dockerize-{app}"
+    entry = {"action": "add_dockerfile", "title": app_doctor.APP_ACTIONS["add_dockerfile"].title, "risk": "low",
+             "decision": "auto_execute", "reason": "The repo has no Dockerfile; DevNexa generated one and this "
+             "deploy proved it works.", "branch": fix_branch}
+    try:
+        github.push_branch(token, repo, sha or github.branch_sha(token, repo, branch), files, fix_branch,
+                           message="build: add {path} (DevNexa)")
+        url = github.open_pr(token, repo, branch, fix_branch, f"Add a Dockerfile for {app} (DevNexa)", _pr_body(
+            f"DevNexa deployed `{repo}` (`{branch}`) with a Dockerfile it generated, because the repo had none. "
+            "Merging this keeps future builds identical on any Docker host.",
+            [("Detected stack", plan.kind), ("App port", str(plan.port)),
+             ("Verified by", f"deploy #{dep_id}, which passed its health check"),
+             ("Notes", " ".join(plan.notes))]))
+        entry.update(status="verified", detail="Pull request opened", pr_url=url)
+    except github.GitHubError as e:
+        entry.update(status="failed", detail=f"Could not open the Dockerfile pull request: {e}")
+        url = None
+    _record(dep_id, entry)
+    if out:
+        out(f"[agent] {entry['detail']}" + (f": {url}" if url else ""))
+    if url:
+        with session_scope() as db:
+            row = db.get(KeyValue, "dockerize_prs")
+            value = {**(row.value if row else {}), key: url}
+            if row:
+                row.value = value
+            else:
+                db.add(KeyValue(key="dockerize_prs", value=value))
+            audit(db, "deploy-agent", "app.dockerize_pr", "app_deployment", dep_id, url)
+
+
+def finish_fix(preview_id: int, ok: bool, out: DeployLog | None = None) -> None:
+    """A fix branch finished its preview deploy: open the PR if it is healthy, report it if not."""
+    with session_scope() as db:
+        preview = db.get(AppDeployment, preview_id)
+        info = (preview.options or {}).get("fix_for") or {}
+        parent = db.get(AppDeployment, info.get("dep"))
+        if not parent:
+            return
+        diag = parent.diagnosis or {}
+        token = github.get_token(db, (parent.options or {}).get("gh_user"))
+        repo, url, err, parent_id, base = parent.repo, preview.url, preview.error, parent.id, parent.branch
+    rem_id = info.get("rem")
+    if not ok:
+        _set_rem(parent_id, rem_id, status="failed", preview_url=None,
+                 detail=f"The fix on {info.get('branch')} did not pass its check (deploy #{preview_id}: {err}). "
+                        "No pull request was opened; the branch is left for a developer.")
+        return
+    try:
+        pr = github.open_pr(token, repo, info.get("base") or base, info["branch"],
+                            f"fix: {diag.get('title', 'deploy failure')} (DevNexa)", _pr_body(
+                                f"Deploy #{parent_id} of `{repo}` failed. DevNexa's Deploy Agent pushed this fix and "
+                                f"checked it: preview deploy #{preview_id} is healthy.",
+                                [("Root cause", diag.get("root_cause")), ("Change", diag.get("suggestion")),
+                                 ("Test it", url), ("Confidence", f"{diag.get('confidence', 0):.2f} "
+                                                                  f"({diag.get('provider')})")],
+                                "```\n" + "\n".join((diag.get("evidence") or [])[:12]) + "\n```"))
+        _set_rem(parent_id, rem_id, pr_url=pr, preview_url=url,
+                 detail=f"Fix verified on {url}. Pull request opened; merge it to ship the fix.")
+        if out:
+            out(f"[agent] fix verified, pull request: {pr}")
+    except github.GitHubError as e:
+        _set_rem(parent_id, rem_id, preview_url=url, detail=f"Fix verified on {url}, but the PR failed: {e}")
 
 
 # --------------------------------------------------------------- monitoring

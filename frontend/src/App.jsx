@@ -16,12 +16,14 @@ import Pipelines from "./pages/Pipelines";
 import Policies from "./pages/Policies";
 import System from "./pages/System";
 import Tests from "./pages/Tests";
+import Traffic from "./pages/Traffic";
 
 export default function App() {
   return (
     <Layout>
       <Routes>
         <Route path="/" element={<Overview />} />
+        <Route path="/traffic" element={<Traffic />} />
         <Route path="/deploy" element={<Deploy />} />
         <Route path="/live" element={<LiveAppsList />} />
         <Route path="/live/:app" element={<LiveApp />} />

@@ -14,23 +14,33 @@ from ..agents import deploy, runner
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import AppDeployment
-from ..services import github
+from ..services import auth, github
 from ..services.audit import audit
 from .serialize import to_dict
 
 router = APIRouter(prefix="/api", tags=["deploy from github"])
 
 
-def require_admin(request: Request):
-    """Deploying runs arbitrary code on the host, so these endpoints need the admin key in live mode."""
+def require_admin(request: Request, db: Session = Depends(get_db)):
+    """Deploying runs arbitrary code on the host, so these endpoints need a signed-in (allowed) GitHub user
+    or the admin key. With neither configured, they are open only in simulated (local) mode."""
     s = get_settings()
-    if not s.admin_token:
-        if s.is_live:
-            raise HTTPException(403, "Set DEVNEXA_ADMIN_TOKEN in .env and restart the backend to enable deploys.")
+    request.state.user = auth.current_user(request, db)
+    if request.state.user:
         return
     given = request.headers.get("x-devnexa-key") or request.query_params.get("key") or ""
-    if not hmac.compare_digest(given.encode(), s.admin_token.encode()):
-        raise HTTPException(401, "Admin key required.")
+    if s.admin_token and given and hmac.compare_digest(given.encode(), s.admin_token.encode()):
+        return
+    if not s.admin_token and not auth.enabled():
+        if s.is_live:
+            raise HTTPException(403, "Set up Sign in with GitHub (DEVNEXA_GITHUB_CLIENT_ID/SECRET) or "
+                                     "DEVNEXA_ADMIN_TOKEN in .env and restart the backend to enable deploys.")
+        return
+    raise HTTPException(401, "Sign in with GitHub first." if auth.enabled() else "Admin key required.")
+
+
+def user(request: Request) -> str | None:
+    return getattr(request.state, "user", None)
 
 
 admin = [Depends(require_admin)]
@@ -58,12 +68,12 @@ class ConnectRequest(BaseModel):
 
 
 @router.get("/github", dependencies=admin)
-def github_status(db: Session = Depends(get_db)):
-    return github.connection(db)
+def github_status(request: Request, db: Session = Depends(get_db)):
+    return github.connection(db, user(request))
 
 
 @router.post("/github/connect", dependencies=admin)
-def github_connect(req: ConnectRequest, db: Session = Depends(get_db)):
+def github_connect(req: ConnectRequest, request: Request, db: Session = Depends(get_db)):
     conn = _gh(github.connect, db, req.token)
     audit(db, conn.get("login") or "operator", "github.connect", "github", None, f"Connected GitHub as {conn['login']}")
     db.commit()
@@ -71,28 +81,28 @@ def github_connect(req: ConnectRequest, db: Session = Depends(get_db)):
 
 
 @router.delete("/github", dependencies=admin)
-def github_disconnect(db: Session = Depends(get_db)):
-    github.disconnect(db)
-    audit(db, "operator", "github.disconnect", "github", None, "Disconnected GitHub")
+def github_disconnect(request: Request, db: Session = Depends(get_db)):
+    github.disconnect(db, user(request))
+    audit(db, user(request) or "operator", "github.disconnect", "github", None, "Disconnected GitHub")
     db.commit()
     return {"connected": False}
 
 
-def _token(db: Session) -> str:
-    token = github.get_token(db)
+def _token(db: Session, login: str | None = None) -> str:
+    token = github.get_token(db, login)
     if not token:
         raise HTTPException(400, "Connect GitHub first.")
     return token
 
 
 @router.get("/github/repos", dependencies=admin)
-def github_repos(db: Session = Depends(get_db)):
-    return _gh(github.list_repos, _token(db))
+def github_repos(request: Request, db: Session = Depends(get_db)):
+    return _gh(github.list_repos, _token(db, user(request)))
 
 
 @router.get("/github/repos/{owner}/{repo}/branches", dependencies=admin)
-def github_branches(owner: str, repo: str, db: Session = Depends(get_db)):
-    return _gh(github.list_branches, _token(db), f"{owner}/{repo}")
+def github_branches(owner: str, repo: str, request: Request, db: Session = Depends(get_db)):
+    return _gh(github.list_branches, _token(db, user(request)), f"{owner}/{repo}")
 
 
 # -------------------------------------------------------------------- apps
@@ -100,8 +110,9 @@ def github_branches(owner: str, repo: str, db: Session = Depends(get_db)):
 def apps_config():
     s = get_settings()
     return {"apps_domain": s.apps_domain or None, "url_mode": "subdomain" if s.apps_domain else "port",
-            "docker_available": deploy.executor.available(), "admin_required": bool(s.admin_token) or s.is_live,
-            "admin_configured": bool(s.admin_token), "monitor_interval_s": s.apps_monitor_interval}
+            "docker_available": deploy.executor.available(), "admin_required": bool(s.admin_token) or s.is_live or auth.enabled(),
+            "admin_configured": bool(s.admin_token), "monitor_interval_s": s.apps_monitor_interval,
+            "github_login": auth.enabled()}
 
 
 class DeployRequest(BaseModel):
@@ -120,7 +131,7 @@ def list_apps(db: Session = Depends(get_db)):
     apps: dict[str, dict] = {}
     for d in deps:
         if (d.options or {}).get("preview_of"):
-            continue  # test URLs are listed under their app
+            continue  # issue-fix test URLs are listed under their app on the Live apps page
         a = apps.setdefault(d.app, {"app": d.app, "repo": d.repo, "latest": dep_dict(d), "live": None,
                                     "deployments": 0})
         a["deployments"] += 1
@@ -138,12 +149,15 @@ def list_app_deployments(app: str | None = None, limit: int = 50, db: Session = 
 
 
 @router.post("/apps/deploy", status_code=201, dependencies=admin)
-def deploy_repo(req: DeployRequest, db: Session = Depends(get_db)):
-    if not github.get_token(db):
+def deploy_repo(req: DeployRequest, request: Request, db: Session = Depends(get_db)):
+    login = user(request)
+    if not github.get_token(db, login):
         raise HTTPException(400, "Connect GitHub first.")
     options = {"port": req.port} if req.port else {}
+    if login:
+        options["gh_user"] = login  # clone, fix branches and PRs use this user's GitHub access
     dep = deploy.create_deployment(db, req.repo, req.branch, req.app, req.root_dir, req.env, options,
-                                   actor=req.actor)
+                                   actor=login or req.actor)
     db.commit()
     runner.submit(deploy.run_deploy, dep.id)
     return dep_dict(dep)
@@ -162,7 +176,8 @@ def get_app_deployment(dep_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/apps/deployments/{dep_id}/redeploy", status_code=201, dependencies=admin)
-def redeploy(dep_id: int, actor: str = "operator", db: Session = Depends(get_db)):
+def redeploy(dep_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
+    actor = user(request) or actor
     d = _get(db, dep_id)
     opts = {k: v for k, v in (d.options or {}).items() if k != "reuse_image"}
     new = deploy.create_deployment(db, d.repo, d.branch, d.app, d.root_dir, dict(d.env or {}), opts, actor=actor)
@@ -172,7 +187,8 @@ def redeploy(dep_id: int, actor: str = "operator", db: Session = Depends(get_db)
 
 
 @router.post("/apps/deployments/{dep_id}/stop", dependencies=admin)
-def stop(dep_id: int, actor: str = "operator", db: Session = Depends(get_db)):
+def stop(dep_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
+    actor = user(request) or actor
     d = _get(db, dep_id)
     if d.container:
         deploy.executor.run(["docker", "rm", "-f", d.container])
@@ -191,12 +207,13 @@ class Decision(BaseModel):
 
 
 @router.post("/apps/deployments/{dep_id}/remediations/{rem_id}/{verdict}", dependencies=admin)
-def decide(dep_id: int, rem_id: int, verdict: str, body: Decision, db: Session = Depends(get_db)):
+def decide(dep_id: int, rem_id: int, verdict: str, body: Decision, request: Request,
+           db: Session = Depends(get_db)):
     if verdict not in ("approve", "reject"):
         raise HTTPException(404, "unknown verdict")
     _get(db, dep_id)
     try:
-        return deploy.decide(dep_id, rem_id, verdict == "approve", body.actor)
+        return deploy.decide(dep_id, rem_id, verdict == "approve", user(request) or body.actor)
     except KeyError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:

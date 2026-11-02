@@ -13,6 +13,20 @@ import { usePoll, useToast } from "../hooks";
 const STEPS = ["queued", "cloning", "building", "starting", "running"];
 const LIVE = new Set(["queued", "cloning", "building", "starting"]);
 
+function SignIn({ me, onKey }) {
+  const [useKey, setUseKey] = useState(false);
+  if (useKey) return <Unlock onDone={onKey} />;
+  return (
+    <Card title="Sign in" icon={Github}
+      subtitle="Sign in with GitHub, pick one of your repositories, and DevNexa deploys it. Only accounts the server owner allows can sign in.">
+      <div className="flex flex-wrap items-center gap-3">
+        <a className="btn-primary" href="/api/auth/github/login?next=/deploy"><Github className="h-4 w-4" /> Sign in with GitHub</a>
+        {me?.admin_key && <button className="btn-ghost text-xs" onClick={() => setUseKey(true)}><KeyRound className="h-3.5 w-3.5" /> Use the admin key instead</button>}
+      </div>
+    </Card>
+  );
+}
+
 function Unlock({ onDone }) {
   const [key, setKey] = useState("");
   const save = (e) => {
@@ -31,7 +45,7 @@ function Unlock({ onDone }) {
   );
 }
 
-function GitHubCard({ conn, reload, show }) {
+function GitHubCard({ conn, me, reload, show }) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const connect = async (e) => {
@@ -49,6 +63,24 @@ function GitHubCard({ conn, reload, show }) {
     await api.del("/api/github");
     reload();
   };
+  const signOut = async () => {
+    await api.post("/api/auth/logout");
+    window.location.reload();
+  };
+  if (me?.signed_in) {
+    return (
+      <Card title="GitHub" icon={Github}
+        action={<button className="btn-ghost py-1.5 text-xs" onClick={signOut}><LogOut className="h-3.5 w-3.5" /> Sign out</button>}>
+        <div className="flex items-center gap-3">
+          {me.avatar_url && <img src={me.avatar_url} alt="" className="h-9 w-9 rounded-full" />}
+          <div>
+            <p className="text-sm text-slate-100">Signed in as <b>@{me.login}</b></p>
+            <p className="text-xs text-slate-500">Repos, fix branches and pull requests use your GitHub access.</p>
+          </div>
+        </div>
+      </Card>
+    );
+  }
   if (conn?.connected) {
     return (
       <Card title="GitHub" icon={Github}
@@ -284,7 +316,11 @@ function AgentCard({ dep, reload, show }) {
               <StatusBadge status={r.status} />
             </div>
             <p className="mt-1 text-xs text-slate-400">{r.reason}{r.detail ? ` ${r.detail}` : ""}</p>
-            {r.pr_url && <a className="mt-1 inline-flex items-center gap-1 text-xs text-indigo-300" href={r.pr_url} target="_blank" rel="noreferrer">Open pull request <ExternalLink className="h-3 w-3" /></a>}
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+              {r.branch && <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-400"><GitBranch className="h-3 w-3" />{r.branch}</span>}
+              {r.preview_url && <a className="inline-flex items-center gap-1 text-xs text-emerald-300" href={r.preview_url} target="_blank" rel="noreferrer">Test the fix <ExternalLink className="h-3 w-3" /></a>}
+              {r.pr_url && <a className="inline-flex items-center gap-1 text-xs text-indigo-300" href={r.pr_url} target="_blank" rel="noreferrer">Open pull request <ExternalLink className="h-3 w-3" /></a>}
+            </div>
             {r.status === "pending_approval" && (
               <div className="mt-2 flex gap-2">
                 <button className="btn-success py-1.5 text-xs" onClick={() => decide(r.id, "approve")}><CheckCircle2 className="h-3.5 w-3.5" /> Approve</button>
@@ -393,7 +429,9 @@ function Detail({ id, onSelect, show }) {
 export default function Deploy() {
   const [, force] = useState(0);
   const { data: cfg } = usePoll("/api/apps/config", 0);
-  const unlocked = !cfg?.admin_required || adminKey();
+  const { data: me } = usePoll("/api/auth/me", 0);
+  const loginError = useMemo(() => new URLSearchParams(window.location.search).get("login_error"), []);
+  const unlocked = cfg && me && (!cfg.admin_required || adminKey() || me.signed_in);
   const { data: conn, error: connErr, reload: reloadConn } = usePoll(unlocked ? "/api/github" : null, 0);
   const { data: apps } = usePoll(unlocked && conn?.connected ? "/api/apps" : null, 4000);
   const [selected, setSelected] = useState(null);
@@ -408,16 +446,18 @@ export default function Deploy() {
   return (
     <>
       <PageHeader eyebrow="Deploy Agent" title="Deploy from GitHub"
-        description="Pick a repo, get a live URL. DevNexa builds it with Docker, streams the logs, watches it, and its agents diagnose and fix failures: safe fixes run automatically, risky ones wait for your approval."
+        description="Pick a repo, get a live URL. DevNexa builds it with Docker, streams the logs and watches it. When a repo has no Dockerfile or a deploy fails, the agent fixes it on a new branch, tests it on a preview URL, and opens a pull request for you to merge."
         actions={adminKey() && <button className="btn-ghost py-1.5 text-xs" onClick={lock}><Lock className="h-3.5 w-3.5" /> Lock</button>} />
       {cfg && !cfg.docker_available && <ErrorBox error="Docker is not available to the backend here, so deploys will fail. On the server, the backend container needs /var/run/docker.sock mounted (docker compose does this)." />}
-      {cfg?.admin_required && !cfg.admin_configured && <ErrorBox error="Set DEVNEXA_ADMIN_TOKEN in the server's .env and restart the backend to turn on deploys." />}
-      {!unlocked ? <Unlock onDone={() => force((n) => n + 1)} /> : connErr && /admin key/i.test(connErr) ? (
-        <><ErrorBox error="That admin key was not accepted." /><Unlock onDone={() => force((n) => n + 1)} /></>
-      ) : (
+      {cfg?.admin_required && !cfg.admin_configured && !cfg.github_login && <ErrorBox error="Set up Sign in with GitHub (DEVNEXA_GITHUB_CLIENT_ID and DEVNEXA_GITHUB_CLIENT_SECRET) or DEVNEXA_ADMIN_TOKEN in the server's .env and restart the backend to turn on deploys." />}
+      {loginError && <ErrorBox error={loginError} />}
+      {!cfg || !me ? <Loading /> : !unlocked ? (cfg.github_login ? <SignIn me={me} onKey={() => force((n) => n + 1)} /> : <Unlock onDone={() => force((n) => n + 1)} />)
+        : connErr && /admin key|sign in/i.test(connErr) ? (
+          <><ErrorBox error="That admin key was not accepted." />{cfg.github_login ? <SignIn me={me} onKey={() => force((n) => n + 1)} /> : <Unlock onDone={() => force((n) => n + 1)} />}</>
+        ) : (
         <div className="grid gap-4 xl:grid-cols-[400px_minmax(0,1fr)]">
           <div className="space-y-4">
-            <GitHubCard conn={conn} reload={reloadConn} show={show} />
+            <GitHubCard conn={conn} me={me} reload={reloadConn} show={show} />
             {conn?.connected && <RepoPicker show={show} onDeployed={setSelected} />}
             {conn?.connected && (
               <Card title="Your apps" icon={Rocket} bodyClass=""

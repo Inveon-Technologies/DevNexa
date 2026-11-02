@@ -20,7 +20,7 @@ from .serialize import to_dict
 
 router = APIRouter(prefix="/api/live", tags=["live apps"])
 public = APIRouter(tags=["live issue capture"])
-PREVIEW_RE = re.compile(r"-(pr|test)-\d+$")
+PREVIEW_RE = re.compile(r"-(pr|test|fix)-\d+$")
 
 
 def _gh(fn, *a, **kw):

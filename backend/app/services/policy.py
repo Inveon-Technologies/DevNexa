@@ -13,6 +13,9 @@ DEFAULT_AUTONOMY = {
     "auto_execute_low": True,      # allowlisted low-risk actions run without a human
     "auto_execute_medium": False,  # a configured policy may allow medium-risk automation
     "min_confidence_for_auto": 0.55,
+    # Deploy Agent: push code fixes (and a generated Dockerfile) to a new branch, check them on a preview URL,
+    # and open a pull request. The base branch and the running app are never changed by this.
+    "auto_fix_branch": True,
 }
 
 

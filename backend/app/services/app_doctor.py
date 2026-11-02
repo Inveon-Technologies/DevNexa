@@ -38,8 +38,13 @@ APP_ACTIONS = {
                               "Redeploy with double the memory limit after an out-of-memory kill."),
     "rollback_app": AppAction("Roll back to the last good deploy", "medium", False,
                               "Point the app's URL back to the previous healthy deployment."),
-    "open_fix_pr": AppAction("Open a fix pull request", "high", False,
-                             "Commit the proposed code change to a new branch and open a PR on the repo."),
+    # Never touches the base branch or the running app: the change goes to a new branch, is checked on a
+    # preview URL, and only then becomes a pull request that a person merges.
+    "open_fix_pr": AppAction("Fix on a new branch and open a pull request", "medium", False,
+                             "Commit the proposed change to a new branch, deploy it to a preview URL, and open a PR "
+                             "once it is healthy."),
+    "add_dockerfile": AppAction("Add the generated Dockerfile to the repo", "low", True,
+                                "The repo had no Dockerfile; open a PR with the one DevNexa generated and deployed."),
     "escalate": AppAction("Needs a developer", "low", True, "No safe automatic fix; the evidence is attached."),
 }
 
@@ -145,6 +150,25 @@ def heuristic(stage: str, log: str) -> dict:
             "confidence": 0.3, "evidence": log.splitlines()[-12:], "stage": stage, "provider": "heuristic"}
 
 
+def dockerfile_patch(diag: dict, repo_dir: Path | None, build_kind: str | None) -> dict[str, str] | None:
+    """The repo's own Dockerfile does not build, and no more specific fix is known: if DevNexa can build this
+    stack itself, propose its generated Dockerfile instead (it is checked on a preview before any PR)."""
+    if not repo_dir or build_kind != "dockerfile" or diag.get("stage") != "build" \
+            or diag["category"] not in ("unknown", "crash", "npm_missing_script", "not_buildable"):
+        return None
+    from . import buildplan
+
+    try:
+        plan = buildplan.detect(repo_dir, {"ignore_dockerfile": True})
+    except buildplan.NotBuildable:
+        return None
+    diag.update(category="dockerfile_broken", title="The repo's Dockerfile does not build",
+                root_cause="The build fails inside the repo's own Dockerfile.",
+                suggestion=f"Replace it with a Dockerfile DevNexa generated for this {plan.kind} app "
+                           f"(port {plan.port}); it is tested on a preview URL first.", confidence=0.7)
+    return {"Dockerfile": plan.generated}
+
+
 def heuristic_patch(diag: dict, repo_dir: Path | None) -> dict[str, str] | None:
     """Mechanical fixes we can write without an LLM."""
     if not repo_dir or not diag.get("subject"):
@@ -222,12 +246,13 @@ def llm_diagnose(analyzer: LLMAnalyzer, stage: str, log: str, repo_dir: Path | N
             "action": action, "llm_patch": patch or None, "provider": analyzer.name}
 
 
-def diagnose(db: Session, stage: str, log: str, repo_dir: Path | None = None) -> dict:
+def diagnose(db: Session, stage: str, log: str, repo_dir: Path | None = None, build_kind: str | None = None) -> dict:
     diag = heuristic(stage, log)
     analyzer = get_analyzer()
     if isinstance(analyzer, LLMAnalyzer):
         diag = llm_diagnose(analyzer, stage, log, repo_dir, diag) or diag
-    patch = diag.pop("llm_patch", None) or heuristic_patch(diag, repo_dir)
+    patch = diag.pop("llm_patch", None) or heuristic_patch(diag, repo_dir) \
+        or dockerfile_patch(diag, repo_dir, build_kind)
     if patch:
         diag["patch"] = patch
         if diag["action"] == "escalate":

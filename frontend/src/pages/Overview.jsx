@@ -1,170 +1,237 @@
-import { CheckCircle2, GitBranch, Rocket, Siren, Timer, TriangleAlert, UserCheck } from "lucide-react";
+import {
+  Activity, AlertOctagon, CheckCircle2, ChevronRight, Gauge, Siren, Timer, TriangleAlert, UserCheck, Users,
+} from "lucide-react";
 import { Link } from "react-router-dom";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Card, chartTooltip, ErrorBox, Loading, StatusBadge, StatusIcon } from "../components/ui";
-import { ago, duration, pct, titleCase } from "../format";
+import { LiveDot, ms, num, secsAgo, StatusCode, TrafficChart } from "../components/traffic";
+import { Badge, Card, ErrorBox, Loading } from "../components/ui";
+import { ago, pct, titleCase } from "../format";
 import { usePoll } from "../hooks";
 
-function StatusBanner({ env, k }) {
-  const ok = env.healthy && !k.open_incidents;
-  const Icon = ok ? CheckCircle2 : TriangleAlert;
-  const detail = !env.healthy
-    ? `Active fault: ${env.active_faults.map(titleCase).join(", ") || "health check failing"}`
-    : k.open_incidents
-      ? `${k.open_incidents} open incident${k.open_incidents > 1 ? "s" : ""} being handled`
-      : "All health checks passing";
-  return (
-    <div className={`flex flex-col gap-3 rounded-2xl border px-5 py-4 sm:flex-row sm:items-center ${
-      ok ? "border-emerald-500/25 bg-emerald-500/[0.07]" : "border-rose-500/30 bg-rose-500/[0.08]"
-    }`}>
-      <Icon className={`h-7 w-7 shrink-0 ${ok ? "text-emerald-400" : "text-rose-400"}`} />
-      <div className="flex-1">
-        <p className="text-lg font-semibold text-white">{ok ? "All systems operational" : "Attention needed"}</p>
-        <p className="text-sm text-slate-400">{detail}</p>
-      </div>
-      <div className="text-sm text-slate-400 sm:text-right">
-        <p className="font-mono text-slate-200">{env.version || "—"}</p>
-        <p className="text-xs">{env.mode === "live" ? "Live stack" : "Simulated environment"}</p>
-      </div>
-    </div>
-  );
-}
-
-function Tile({ label, value, hint, icon: Icon, to, alert }) {
+function Tile({ label, value, hint, icon: Icon, tone = "slate", to }) {
+  const color = { slate: "text-white", red: "text-rose-300", amber: "text-amber-200", green: "text-emerald-300" }[tone];
   const body = (
-    <div className={`card h-full p-4 transition ${to ? "hover:border-white/15" : ""}`}>
+    <div className={`card h-full p-4 ${to ? "transition hover:border-white/15" : ""}`}>
       <div className="flex items-center justify-between text-slate-400">
         <p className="text-xs font-medium">{label}</p>
-        <Icon className={`h-4 w-4 ${alert ? "text-amber-300" : ""}`} />
+        <Icon className="h-4 w-4" />
       </div>
-      <p className={`mt-2 text-2xl font-semibold tracking-tight ${alert ? "text-amber-200" : "text-white"}`}>{value ?? "—"}</p>
+      <p className={`mt-2 text-3xl font-semibold tracking-tight ${color}`}>{value ?? "—"}</p>
       {hint && <p className="mt-1 text-xs text-slate-500">{hint}</p>}
     </div>
   );
   return to ? <Link to={to}>{body}</Link> : body;
 }
 
-const viewAll = (to) => <Link to={to} className="text-xs text-indigo-300 hover:text-indigo-200">View all</Link>;
+/** One list of everything that needs a human, most urgent first. */
+function buildAttention(t, ov, incidents) {
+  const items = [];
+  for (const p of t?.problems || []) {
+    if (p.severity !== "error") continue;
+    items.push({
+      key: `p-${p.app}-${p.method}-${p.path}-${p.status}`, tone: "red", status: p.status,
+      title: `${p.method} ${p.path}`,
+      detail: `${p.app} · ${p.count} failed request${p.count > 1 ? "s" : ""} · last ${secsAgo(p.last_seen)}`,
+      to: `/traffic?app=${encodeURIComponent(p.app)}&errors=1&path=${encodeURIComponent(p.path)}`,
+    });
+  }
+  for (const i of incidents || []) {
+    items.push({
+      key: `i-${i.id}`, tone: "red", icon: Siren, title: `Incident #${i.id}: ${i.title}`,
+      detail: `${i.diagnosis?.title || "Diagnosing"} · ${titleCase(i.status)} · ${ago(i.detected_at)}`,
+      to: `/incidents/${i.id}`,
+    });
+  }
+  for (const c of ov?.environment?.health || []) {
+    if (c.passed) continue;
+    items.push({
+      key: `h-${c.name}`, tone: "red", icon: TriangleAlert, title: `Health check failing: ${c.name}`,
+      detail: `${typeof c.value === "number" ? +c.value.toFixed(3) : c.value} (limit ${c.threshold})`, to: "/incidents",
+    });
+  }
+  if (ov?.kpis?.pending_approvals) {
+    const n = ov.kpis.pending_approvals;
+    items.push({
+      key: "approvals", tone: "amber", icon: UserCheck, title: `${n} fix${n > 1 ? "es" : ""} waiting for your approval`,
+      detail: "Review and approve or reject", to: "/approvals",
+    });
+  }
+  for (const p of (t?.problems || []).filter((x) => x.severity !== "error").slice(0, 3)) {
+    items.push({
+      key: `w-${p.app}-${p.method}-${p.path}-${p.status}`, tone: "amber", status: p.status,
+      title: `${p.method} ${p.path}`,
+      detail: `${p.app} · ${p.count} request${p.count > 1 ? "s" : ""} · ${p.status === 404 ? "missing page or broken link" : "client error"}`,
+      to: `/traffic?app=${encodeURIComponent(p.app)}&errors=1&path=${encodeURIComponent(p.path)}`,
+    });
+  }
+  return items;
+}
+
+function Attention({ items }) {
+  if (!items.length) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 px-5 py-10 text-center">
+        <CheckCircle2 className="h-7 w-7 text-emerald-400" />
+        <p className="text-sm font-medium text-slate-200">Nothing needs attention</p>
+        <p className="text-xs text-slate-500">No failing pages, incidents or pending approvals.</p>
+      </div>
+    );
+  }
+  return (
+    <ul className="divide-y divide-white/[0.04]">
+      {items.slice(0, 8).map((it) => (
+        <li key={it.key}>
+          <Link to={it.to} className="flex items-center gap-3 px-5 py-3 hover:bg-white/[0.03]">
+            {it.status ? <StatusCode status={it.status} /> : (
+              <span className="grid w-11 shrink-0 place-items-center">
+                <it.icon className={`h-4 w-4 ${it.tone === "red" ? "text-rose-400" : "text-amber-300"}`} />
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className={`truncate text-sm text-slate-100 ${it.status ? "font-mono text-[12.5px]" : ""}`}>{it.title}</p>
+              <p className="truncate text-xs text-slate-500">{it.detail}</p>
+            </div>
+            <ChevronRight className="h-4 w-4 shrink-0 text-slate-600" />
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function AppsTable({ apps }) {
+  if (!apps.length) {
+    return (
+      <p className="px-5 py-8 text-sm text-slate-400">
+        No visits yet. Deploy an app from <Link to="/deploy" className="text-indigo-300 hover:text-indigo-200">Deploy from GitHub</Link> and
+        open its URL to see traffic here.
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[560px]">
+        <thead>
+          <tr className="border-b border-white/[0.06]">
+            <th className="table-head">App</th>
+            <th className="table-head text-right">Visitors</th>
+            <th className="table-head text-right">Requests</th>
+            <th className="table-head text-right">Errors</th>
+            <th className="table-head text-right">p95</th>
+            <th className="table-head text-right">Last visit</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/[0.04]">
+          {apps.map((a) => (
+            <tr key={a.app} className="hover:bg-white/[0.02]">
+              <td className="table-cell">
+                <Link to={`/traffic?app=${encodeURIComponent(a.app)}`} className="flex items-center gap-2 font-medium text-slate-100 hover:text-indigo-200">
+                  <span className={`h-2 w-2 rounded-full ${a.errors ? "bg-rose-400" : "bg-emerald-400"}`} />
+                  {a.app}
+                </Link>
+              </td>
+              <td className="table-cell text-right text-slate-300">{num(a.visitors)}</td>
+              <td className="table-cell text-right text-slate-300">{num(a.requests)}</td>
+              <td className={`table-cell text-right ${a.errors ? "font-medium text-rose-300" : "text-slate-500"}`}>
+                {a.errors ? `${a.errors} (${pct(a.error_rate, 1)})` : "0"}
+              </td>
+              <td className="table-cell text-right text-slate-300">{ms(a.p95_ms)}</td>
+              <td className="table-cell text-right text-xs text-slate-500">{a.last_seen ? secsAgo(a.last_seen) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RecentRequests({ rows }) {
+  if (!rows.length) return <p className="px-5 py-6 text-sm text-slate-400">No requests in the last 30 minutes.</p>;
+  return (
+    <ul className="divide-y divide-white/[0.04] font-mono text-[12px]">
+      {rows.map((r, i) => (
+        <li key={`${r.ts}-${i}`} className="flex items-center gap-3 px-5 py-2">
+          <StatusCode status={r.status} />
+          <span className="w-10 shrink-0 text-slate-500">{r.method}</span>
+          <span className="min-w-0 flex-1 truncate text-slate-200">
+            <span className="text-slate-500">{r.app}</span> {r.path}
+          </span>
+          <span className="hidden w-16 shrink-0 text-right text-slate-400 sm:block">{ms(r.ms)}</span>
+          <span className="w-16 shrink-0 text-right text-slate-500">{secsAgo(r.ts)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export default function Overview() {
-  const { data, error } = usePoll("/api/overview", 4000);
-  const { data: runs } = usePoll("/api/pipelines?limit=5", 4000);
-  const { data: open } = usePoll("/api/incidents?status=open&limit=5", 4000);
-  if (!data) return error ? <ErrorBox error={error} /> : <Loading />;
-  const k = data.kpis;
-  const env = data.environment;
-  const dep = data.active_deployment;
+  const { data: t, error: tErr } = usePoll("/api/traffic?minutes=30&limit=12", 3000);
+  const { data: ov, error } = usePoll("/api/overview", 5000);
+  const { data: incidents } = usePoll("/api/incidents?status=open&limit=5", 5000);
+  if (!ov && !t) return error || tErr ? <ErrorBox error={error || tErr} /> : <Loading />;
+
+  const s = t?.summary;
+  const items = buildAttention(t, ov, incidents);
+  const urgent = items.filter((i) => i.tone === "red").length;
+  const errTone = !s ? "slate" : s.error_rate_5m >= 0.05 ? "red" : s.errors_5m ? "amber" : "green";
+
   return (
     <>
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-white">Dashboard</h1>
-          <p className="mt-1 text-sm text-slate-400">Service health, deployments and incidents at a glance. Refreshes every few seconds.</p>
+          <p className="mt-1 text-sm text-slate-400">Who is using your apps right now, and what is breaking.</p>
         </div>
-        <Link to="/pipelines" className="btn-primary"><GitBranch className="h-4 w-4" /> Run pipeline</Link>
+        <div className="flex items-center gap-3">
+          {t?.simulated && <Badge tone="violet">Simulated traffic</Badge>}
+          <LiveDot />
+        </div>
       </div>
 
-      <StatusBanner env={env} k={k} />
-
-      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Tile label="Pipeline success" value={pct(k.pipeline_success_rate)} hint={`${k.pipeline_runs} runs`} icon={GitBranch} to="/pipelines" />
-        <Tile label="Open incidents" value={k.open_incidents} hint={`${k.resolved_incidents} resolved`} icon={Siren} to="/incidents" alert={k.open_incidents > 0} />
-        <Tile label="Mean time to recovery" value={duration(k.mttr_s)} hint="detection to verified fix" icon={Timer} />
-        <Tile label="Waiting for approval" value={k.pending_approvals} hint="fixes needing a human" icon={UserCheck} to="/approvals" alert={k.pending_approvals > 0} />
+      <div className={`mb-4 flex items-center gap-3 rounded-2xl border px-5 py-3.5 ${
+        urgent ? "border-rose-500/30 bg-rose-500/[0.08]" : "border-emerald-500/25 bg-emerald-500/[0.07]"
+      }`}>
+        {urgent ? <TriangleAlert className="h-5 w-5 shrink-0 text-rose-400" /> : <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />}
+        <p className="flex-1 text-sm font-medium text-white">
+          {urgent ? `${urgent} problem${urgent > 1 ? "s" : ""} need${urgent > 1 ? "" : "s"} attention` : "Everything is working"}
+        </p>
+        <span className="hidden text-xs text-slate-400 sm:block">
+          {ov?.environment?.mode === "live" ? "Live stack" : "Simulated environment"}
+          {ov?.environment?.version ? ` · ${ov.environment.version}` : ""}
+        </span>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card title="Health checks" subtitle={dep ? `Running ${dep.version} · deployed ${ago(dep.deployed_at)}` : "orders-service"}
-              action={<Link to="/deployments" className="text-xs text-indigo-300 hover:text-indigo-200"><Rocket className="inline h-3.5 w-3.5" /> Deployments</Link>}>
-          <ul className="space-y-2.5">
-            {env.health.map((c) => (
-              <li key={c.name} className="flex items-center justify-between gap-3 text-sm">
-                <span className="flex items-center gap-2 text-slate-300">
-                  <span className={`h-2 w-2 rounded-full ${c.passed ? "bg-emerald-400" : "bg-rose-400"}`} />
-                  {c.name}
-                </span>
-                <span className={`font-mono text-xs ${c.passed ? "text-slate-300" : "text-rose-300"}`}>
-                  {typeof c.value === "number" ? +c.value.toFixed(3) : c.value}
-                  <span className="text-slate-500"> / {c.threshold}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Card>
+      {t?.note && !t.simulated && (
+        <p className="mb-4 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5 text-xs text-slate-400">{t.note}</p>
+      )}
 
-        <Card title="Open incidents" bodyClass="py-1" action={viewAll("/incidents")}>
-          {!open ? <Loading /> : !open.length ? (
-            <p className="flex items-center gap-2 px-5 py-6 text-sm text-slate-400">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" /> No open incidents.
-            </p>
-          ) : (
-            <ul className="divide-y divide-white/[0.04]">
-              {open.map((i) => (
-                <li key={i.id}>
-                  <Link to={`/incidents/${i.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-white/[0.02]">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm text-slate-100">#{i.id} {i.title}</p>
-                      <p className="text-xs text-slate-500">
-                        {i.diagnosis?.title || "Diagnosing…"} · {ago(i.detected_at)}
-                      </p>
-                    </div>
-                    <StatusBadge status={i.status} />
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Tile label="Visitors now" value={num(s?.visitors_5m)} hint={`${num(s?.visitors)} in the last 30 min`} icon={Users} to="/traffic" />
+        <Tile label="Requests / min" value={s ? s.requests_per_min : "—"} hint={`${num(s?.requests)} in the last 30 min`} icon={Activity} to="/traffic" />
+        <Tile label="Error rate" value={s ? pct(s.error_rate_5m, 1) : "—"} hint={`${s?.errors_5m ?? 0} server errors in 5 min`}
+              icon={AlertOctagon} tone={errTone} to="/traffic?errors=1" />
+        <Tile label="Slowest 5% (p95)" value={ms(s?.p95_ms_5m)} hint="response time, last 5 min" icon={Timer}
+              tone={s?.p95_ms_5m >= 1000 ? "amber" : "slate"} />
+      </div>
 
-        <Card title="Recent pipelines" bodyClass="py-1" action={viewAll("/pipelines")}>
-          {!runs ? <Loading /> : !runs.length ? (
-            <p className="px-5 py-6 text-sm text-slate-400">No pipeline runs yet.</p>
-          ) : (
-            <ul className="divide-y divide-white/[0.04]">
-              {runs.map((r) => (
-                <li key={r.id}>
-                  <Link to={`/pipelines/${r.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-white/[0.02]">
-                    <StatusIcon status={r.status} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm text-slate-100">{r.commit_message || r.commit_sha.slice(0, 7)}</p>
-                      <p className="truncate text-xs text-slate-500">
-                        #{r.id} · {r.repo} · {r.branch} · {ago(r.created_at)}
-                      </p>
-                    </div>
-                    <span className="text-xs text-slate-500">{duration(r.duration_s)}</span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2" title="Traffic" subtitle="Requests and server errors per minute, last 30 minutes"
+              action={<Link to="/traffic" className="text-xs text-indigo-300 hover:text-indigo-200">Open live traffic</Link>}>
+          {t ? <TrafficChart series={t.series} /> : <Loading />}
         </Card>
-
-        <Card title="Last 7 days" subtitle="Pipeline runs per day">
-          <div className="h-48">
-            <ResponsiveContainer>
-              <BarChart data={data.timeline} margin={{ left: -20, right: 8, top: 8 }}>
-                <CartesianGrid vertical={false} />
-                <XAxis dataKey="date" tickFormatter={(d) => d.slice(5)} axisLine={false} tickLine={false} />
-                <YAxis allowDecimals={false} axisLine={false} tickLine={false} />
-                <Tooltip {...chartTooltip} />
-                <Bar dataKey="success" stackId="a" fill="#34d399" name="Passed" />
-                <Bar dataKey="failed" stackId="a" fill="#fb7185" radius={[4, 4, 0, 0]} name="Failed" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+        <Card title="Needs attention" subtitle={items.length ? `${items.length} item${items.length > 1 ? "s" : ""}` : "All clear"}
+              bodyClass="py-1">
+          <Attention items={items} />
         </Card>
       </div>
 
-      <Card className="mt-4" title="Recent activity" bodyClass="py-1" action={viewAll("/audit")}>
-        <ul className="divide-y divide-white/[0.04]">
-          {data.recent_activity.slice(0, 6).map((a) => (
-            <li key={a.id} className="flex items-baseline gap-3 px-5 py-2.5">
-              <p className="min-w-0 flex-1 truncate text-[13px] text-slate-200">{a.message}</p>
-              <p className="shrink-0 text-[11px] text-slate-500">{a.actor} · {ago(a.ts)}</p>
-            </li>
-          ))}
-          {!data.recent_activity.length && <li className="px-5 py-6 text-sm text-slate-400">Nothing yet.</li>}
-        </ul>
+      <Card className="mt-4" title="Apps" subtitle="Last 30 minutes" bodyClass="py-1"
+            action={<Link to="/deploy" className="text-xs text-indigo-300 hover:text-indigo-200"><Gauge className="inline h-3.5 w-3.5" /> Manage apps</Link>}>
+        <AppsTable apps={t?.apps || []} />
+      </Card>
+
+      <Card className="mt-4" title="Latest requests" bodyClass="py-1"
+            action={<Link to="/traffic" className="text-xs text-indigo-300 hover:text-indigo-200">See all</Link>}>
+        <RecentRequests rows={t?.recent || []} />
       </Card>
     </>
   );

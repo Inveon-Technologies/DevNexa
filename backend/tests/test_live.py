@@ -159,7 +159,7 @@ def test_issue_fix_gets_a_test_url_and_merges_on_approval(client, fake, monkeypa
 
     r = client.post(f"/api/live/apps/fix-app/issues/{iid}/fix", json={"actor": "vaibhav", "hint": "cart page"})
     assert r.status_code == 202, r.text
-    assert calls[0] == ("commit", f"devnexa/fix-fix-app-{iid}", {"main.py": FILES["main.py"] + "# fixed\n"})
+    assert calls[0] == ("commit", f"devnexa/issue-fix-app-{iid}", {"main.py": FILES["main.py"] + "# fixed\n"})
     pv = client.get("/api/live/apps/fix-app/previews").json()[0]
     assert pv["preview_app"] == "fix-app-pr-7" and pv["status"] == "ready"
     assert pv["url"] == "https://fix-app-pr-7.devnexa.space" and pv["pr_number"] == 7
@@ -171,7 +171,7 @@ def test_issue_fix_gets_a_test_url_and_merges_on_approval(client, fake, monkeypa
 
     res = client.post(f"/api/live/previews/{pv['id']}/approve", json={"actor": "vaibhav"})
     assert res.status_code == 200, res.text
-    assert ("merge", 7) in calls and ("delete", f"devnexa/fix-fix-app-{iid}") in calls
+    assert ("merge", 7) in calls and ("delete", f"devnexa/issue-fix-app-{iid}") in calls
     assert client.get("/api/live/apps/fix-app/previews").json()[0]["status"] == "merged"
     r = rels(client, "fix-app")
     assert [(x["label"], x["status"], x["source"]) for x in r][:2] == [("v2", "live", "fix-merge"), ("v1", "backup", "deploy")]

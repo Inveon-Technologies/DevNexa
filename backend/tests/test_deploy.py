@@ -50,14 +50,24 @@ class FakeExecutor:
         return code, out
 
 
+pushed: list[dict] = []
+
+
 @pytest.fixture
 def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(get_settings(), "apps_workdir", str(tmp_path / "work"))
     monkeypatch.setattr(get_settings(), "apps_domain", "devnexa.space")
     monkeypatch.setattr(get_settings(), "apps_health_timeout", 0)
     monkeypatch.setattr(deploy.time, "sleep", lambda s: None)
-    monkeypatch.setattr(github, "get_token", lambda db: "ghp_secret_token_123")
+    monkeypatch.setattr(github, "get_token", lambda db, login=None: "ghp_secret_token_123")
     monkeypatch.setattr(deploy, "probe", lambda url: (200, 3.0))
+    monkeypatch.setattr(github, "branch_sha", lambda token, repo, branch: "base000sha")
+    pushed.clear()
+    monkeypatch.setattr(github, "push_branch", lambda token, repo, sha, files, branch, message="":
+                        pushed.append({"repo": repo, "sha": sha, "files": files, "branch": branch}))
+    monkeypatch.setattr(github, "open_pr", lambda token, repo, base, branch, title, body, draft=False:
+                        pushed.append({"pr": branch, "base": base, "title": title, "body": body})
+                        or f"https://github.com/{repo}/pull/{len(pushed)}")
 
     def use(**kw):
         ex = FakeExecutor(**kw)
@@ -150,23 +160,94 @@ def test_lockfile_failure_is_fixed_automatically(client, fake):
         __import__("app.db", fromlist=["SessionLocal"]).SessionLocal(), app_doctor.symptoms(d["diagnosis"])))
 
 
-def test_missing_python_module_proposes_fix_pr_needing_approval(client, fake, monkeypatch):
-    fake(files={"requirements.txt": "flask\n", "app.py": "import yaml\nfrom flask import Flask\napp = Flask(__name__)\n"},
-         running=False, logs="Traceback (most recent call last):\nModuleNotFoundError: No module named 'yaml'")
-    opened = {}
-    monkeypatch.setattr(github, "open_fix_pr", lambda token, repo, base, sha, files, title, body, branch:
-                        opened.update(files=files, branch=branch) or "https://github.com/vaibhav/flasky/pull/7")
-    d = deploy_repo(client, repo="vaibhav/flasky")
+def test_missing_python_module_is_fixed_on_a_branch_and_verified_before_the_pr(client, fake):
+    files = {"requirements.txt": "flask\n", "app.py": "import yaml\nfrom flask import Flask\napp = Flask(__name__)\n"}
+    ex = fake(files=files, running=False,
+              logs="Traceback (most recent call last):\nModuleNotFoundError: No module named 'yaml'")
+    real_run = ex.run
+
+    def fixed_on_branch(cmd, on_line=None, timeout=None, env=None):
+        if cmd[:2] == ["git", "clone"]:  # the fix branch has the patched requirements.txt and starts fine
+            on_fix = "devnexa/fix-flasky-" in " ".join(cmd)
+            ex.files = {**files, "requirements.txt": "flask\npyyaml\n"} if on_fix else files
+            ex.running = on_fix
+        return real_run(cmd, on_line, timeout, env)
+    ex.run = fixed_on_branch
+    d = client.get(f"/api/apps/deployments/{deploy_repo(client, repo='vaibhav/flasky')['id']}").json()
     assert d["status"] == "failed"
     diag = d["diagnosis"]
     assert diag["category"] == "python_module_missing" and diag["action"] == "open_fix_pr"
     assert diag["patch"]["requirements.txt"].endswith("pyyaml\n")
     rem = d["remediations"][0]
-    assert rem["risk"] == "high" and rem["status"] == "pending_approval"
-    r = client.post(f"/api/apps/deployments/{d['id']}/remediations/0/approve", json={"actor": "vaibhav"}).json()
-    assert r["pr_url"].endswith("/pull/7")
-    assert opened["files"] == diag["patch"]
-    assert client.post(f"/api/apps/deployments/{d['id']}/remediations/0/approve", json={}).status_code == 409
+    assert rem["decision"] == "auto_execute" and rem["status"] == "verified"
+    branch = f"devnexa/fix-flasky-{d['id']}"
+    push = next(p for p in pushed if p.get("branch") == branch)
+    assert push["files"] == diag["patch"] and push["sha"] == "abc1234def5678"
+    # the PR is opened only after the preview of the fix branch is healthy, and links to it
+    pr = next(p for p in pushed if p.get("pr") == branch)
+    assert pr["base"] == "main" and f"https://flasky-fix-{d['id']}.devnexa.space" in pr["body"]
+    assert rem["pr_url"].startswith("https://github.com/vaibhav/flasky/pull/")
+    assert rem["preview_url"] == f"https://flasky-fix-{d['id']}.devnexa.space"
+    preview = client.get(f"/api/apps/deployments/{rem['preview_id']}").json()
+    assert preview["branch"] == branch and preview["status"] == "running" and preview["parent_id"] == d["id"]
+
+
+def test_fix_branch_that_still_fails_gets_no_pr(client, fake):
+    fake(files={"requirements.txt": "flask\n", "app.py": "import yaml\n"}, running=False,
+         logs="ModuleNotFoundError: No module named 'yaml'")
+    d = deploy_repo(client, repo="vaibhav/stubborn")
+    d = client.get(f"/api/apps/deployments/{d['id']}").json()
+    rem = d["remediations"][0]
+    assert rem["status"] == "failed" and "No pull request" in rem["detail"]
+    assert not any(p.get("pr") for p in pushed)
+
+
+def test_fix_prs_wait_for_approval_when_auto_fix_is_off(client, fake):
+    client.put("/api/policies/autonomy", json={"auto_fix_branch": False})
+    try:
+        fake(files={"requirements.txt": "flask\n", "app.py": "import yaml\n"}, running=False,
+             logs="ModuleNotFoundError: No module named 'yaml'")
+        d = deploy_repo(client, repo="vaibhav/careful")
+        rem = d["remediations"][0]
+        assert rem["action"] == "open_fix_pr" and rem["status"] == "pending_approval"
+        assert not pushed
+        client.post(f"/api/apps/deployments/{d['id']}/remediations/0/approve", json={"actor": "vaibhav"})
+        assert any(p.get("branch") == f"devnexa/fix-careful-{d['id']}" for p in pushed)
+        assert client.post(f"/api/apps/deployments/{d['id']}/remediations/0/approve", json={}).status_code == 409
+    finally:
+        client.put("/api/policies/autonomy", json={"auto_fix_branch": True})
+
+
+def test_repo_without_dockerfile_gets_a_dockerfile_pr_once(client, fake):
+    fake(files={"requirements.txt": "fastapi\n", "main.py": "from fastapi import FastAPI\napp = FastAPI()\n"})
+    d = deploy_repo(client, repo="vaibhav/no-docker")
+    rem = next(r for r in d["remediations"] if r["action"] == "add_dockerfile")
+    assert rem["status"] == "verified" and rem["pr_url"]
+    push = next(p for p in pushed if p.get("branch") == "devnexa/dockerize-no-docker")
+    assert '"uvicorn", "main:app"' in push["files"]["Dockerfile"] and ".dockerignore" in push["files"]
+    pushed.clear()
+    deploy_repo(client, repo="vaibhav/no-docker")
+    assert not pushed  # already proposed for this repo and branch
+
+
+def test_broken_repo_dockerfile_is_replaced_by_a_generated_one(client, fake):
+    ex = fake(files={"Dockerfile": "FROM node:20\nRUN make everything\n", "package.json": json.dumps(
+        {"scripts": {"start": "node server.js"}}), "server.js": ""}, build_ok=False,
+        build_log="#5 [2/2] RUN make everything\n#5 0.2 /bin/sh: make: not found\n#5 ERROR: process did not complete")
+    real_run = ex.run
+
+    def generated_builds(cmd, on_line=None, timeout=None, env=None):
+        if cmd[:2] == ["git", "clone"]:
+            on_fix = "devnexa/fix-" in " ".join(cmd)
+            ex.build_ok = on_fix
+            if on_fix:
+                ex.files = {**ex.files, "Dockerfile": next(p for p in pushed if "files" in p)["files"]["Dockerfile"]}
+        return real_run(cmd, on_line, timeout, env)
+    ex.run = generated_builds
+    d = client.get(f"/api/apps/deployments/{deploy_repo(client, repo='vaibhav/bad-docker')['id']}").json()
+    assert d["diagnosis"]["category"] == "dockerfile_broken"
+    assert "npm" in d["diagnosis"]["patch"]["Dockerfile"]
+    assert d["remediations"][0]["pr_url"]
 
 
 def test_runtime_crash_is_restarted_and_verified(client, fake):

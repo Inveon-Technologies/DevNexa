@@ -132,7 +132,8 @@ def list_releases(db: Session, app: str) -> list[AppRelease]:
 
 
 def is_preview(dep: AppDeployment) -> bool:
-    return bool((dep.options or {}).get("preview_of"))
+    opts = dep.options or {}
+    return bool(opts.get("preview_of") or opts.get("fix_for"))  # test URLs: issue fixes and deploy-failure fixes
 
 
 # ------------------------------------------------------------------ releases

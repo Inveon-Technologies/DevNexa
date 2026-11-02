@@ -47,6 +47,16 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_repo: str = ""
 
+    # Sign in with GitHub (an OAuth app). The callback URL to register on GitHub is
+    # <public_url>/api/auth/github/callback. Only the GitHub logins in github_allowed_users may sign in;
+    # if that list is empty, the first account that signs in becomes the owner and nobody else can.
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_allowed_users: str = ""
+    public_url: str = ""
+    session_secret: str = ""
+    session_days: int = 14
+
     # Deploying user repos ("Deploy from GitHub"). The admin token guards the GitHub and app-deploy APIs:
     # in live mode they refuse to work until it is set, because a deploy runs arbitrary code on the host.
     admin_token: str = ""
@@ -62,6 +72,11 @@ class Settings(BaseSettings):
     apps_health_timeout: int = 60
     apps_monitor_interval: float = 15.0
     apps_max_auto_restarts: int = 3
+
+    # Live user traffic on the dashboard. "auto": tail Caddy's access log in live mode, simulate it otherwise.
+    # "caddy" always tails the log, "simulated" always simulates, "off" disables it.
+    traffic_source: str = "auto"
+    traffic_log: str = "/var/log/caddy/access.log"
 
     @property
     def is_sqlite(self) -> bool:

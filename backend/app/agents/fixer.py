@@ -3,7 +3,7 @@
 1. Clone the repo at the live commit and pick the files most related to the issue (page route, section selector,
    names in the error and stack).
 2. Propose a patch: the configured LLM, or a mechanical fix for known server errors (e.g. a missing dependency).
-3. Commit it to `devnexa/fix-<app>-<issue>`, open a pull request, and deploy that branch as its own app at
+3. Commit it to `devnexa/issue-<app>-<issue>`, open a pull request, and deploy that branch as its own app at
    https://<app>-pr-<N>.<domain> so a person can try the fix before it reaches the live URL.
 4. Approve: merge the PR, remove the test deployment and redeploy the app (a new version, v<N+1>, with the old one
    kept as a backup). Reject: close the PR and remove the test deployment.
@@ -191,7 +191,7 @@ def start_fix(issue_id: int, actor: str = "operator", hint: str | None = None) -
         _set_fix(issue_id, status="opening_pr", diagnosis=public, files=list(patch))
         if not sha:
             sha = github.branch_sha(token, repo, branch)
-        fix_branch = f"devnexa/fix-{data['app']}-{issue_id}"
+        fix_branch = f"devnexa/issue-{data['app']}-{issue_id}"
         github.commit_files(token, repo, sha, fix_branch, patch, f"fix({data['app']}): {prop['title']}")
         body = (f"DevNexa's Fix Agent found this issue on the live app **{data['app']}**:\n\n"
                 f"- **What:** {data['kind'].replace('_', ' ')}: `{data['message'][:300]}`\n"
@@ -352,7 +352,7 @@ def should_auto_fix(db: Session, issue: AppIssue) -> bool:
     person). Limited per app and hour so a noisy app cannot run up LLM or build costs."""
     if issue.status != "open" or issue.fix or issue.severity != "error" or issue.count < AUTO_FIX_MIN_COUNT:
         return False
-    if re.search(r"-(pr|test)-\d+$", issue.app):
+    if re.search(r"-(pr|test|fix)-\d+$", issue.app):
         return False  # issues on test URLs belong to the fix being tested
     if not releases.get_settings(db, issue.app)["steps"]["auto_fix"]:
         return False
