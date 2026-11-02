@@ -112,20 +112,55 @@ similar past fixes, apply **graded remediation** and **verify**, then **learn** 
 | --- | --- | --- |
 | Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space |
 | Medium | after approval | double the memory limit after an out-of-memory kill, roll back to the last healthy image |
-| High | after approval | open a pull request on your repo with the proposed code fix (e.g. add the missing package to `requirements.txt` / `package.json`, or an LLM-written patch) |
+| Code fix | automatically on a **new branch** (switch off in Risk policy: "Fix deploys on a new branch") | push the fix to `devnexa/fix-<app>-<id>`, deploy that branch to a preview URL `https://<app>-fix-<id>.<domain>`, and open a pull request only once the preview is healthy. Examples: add the missing package to `requirements.txt` / `package.json`, replace a repo Dockerfile that does not build with a generated one, or an LLM-written patch |
+
+Your base branch and the running app are never changed by an agent fix: you test the preview URL, merge the pull
+request, and the push webhook redeploys the app from the merged code.
+
+**Repos that are not Docker-ready.** When a repo has no Dockerfile, DevNexa generates one for its stack and
+deploys with it. Once that deploy passes its health check, the agent opens a pull request
+(`devnexa/dockerize-<app>`) that adds the generated `Dockerfile` and a `.dockerignore`, once per repo and branch.
+
+### Sign in with GitHub
+
+Users sign in with their GitHub account instead of pasting a token. DevNexa then lists the repositories that account
+can access, clones with that account's access, and pushes fix branches and pull requests as that account.
+
+1. On GitHub open **Settings → Developer settings → OAuth Apps → New OAuth App**
+   (<https://github.com/settings/applications/new>), or the same page under an organization's settings.
+2. Fill in:
+   * **Application name**: `DevNexa`
+   * **Homepage URL**: `https://devnexa.example.com`
+   * **Authorization callback URL**: `https://devnexa.example.com/api/auth/github/callback`
+3. **Register application**, copy the **Client ID**, then **Generate a new client secret** and copy it.
+4. Add to `.env` next to `docker-compose.yml` and restart (`docker compose --profile https up -d`):
+
+   ```bash
+   DEVNEXA_GITHUB_CLIENT_ID=Ov23li...
+   DEVNEXA_GITHUB_CLIENT_SECRET=...
+   DEVNEXA_PUBLIC_URL=https://devnexa.example.com
+   DEVNEXA_GITHUB_ALLOWED_USERS=your-login,teammate   # who may sign in
+   ```
+
+Deploying runs code on your server, so only the logins in `DEVNEXA_GITHUB_ALLOWED_USERS` can sign in. If it is
+empty, the first account that signs in becomes the only owner. The OAuth app asks for the `repo` scope (needed to
+clone private repos and open pull requests) and `read:user`. Organization repos appear once the organization
+approves the OAuth app (GitHub shows a "Request" button on the consent screen). Tokens stay on the server; the
+browser only gets a signed session cookie. The admin key still works as a fallback.
 
 ### Turning it on (server)
 
 ```bash
 # .env next to docker-compose.yml
-DEVNEXA_ADMIN_TOKEN=<long random string>   # required: deploys run code on your server
+DEVNEXA_ADMIN_TOKEN=<long random string>   # fallback login (or set up Sign in with GitHub)
 DEVNEXA_DOMAIN=devnexa.example.com
 DEVNEXA_APPS_DOMAIN=devnexa.example.com    # apps at https://<app>.devnexa.example.com
 ```
 
 * Add a **wildcard DNS record** `*.devnexa.example.com` (A record) pointing at the same server IP.
   Caddy then issues a certificate per app on first visit, only for app names DevNexa knows.
-* `docker compose --profile https up -d --build`, open the dashboard, enter the admin key, and paste a GitHub token
+* `docker compose --profile https up -d --build`, open the dashboard and **Sign in with GitHub** (above), or enter
+  the admin key and paste a GitHub token
   (classic token with the `repo` scope, or a fine-grained token with *Contents: read & write* and
   *Pull requests: read & write* for the repos you want; write access is only used for approved fix PRs).
 * Without `DEVNEXA_APPS_DOMAIN`, each app is published on a host port instead (`http://<domain>:20000-20999`),
@@ -144,7 +179,11 @@ All settings are environment variables with the `DEVNEXA_` prefix (see `backend/
 | `DEVNEXA_GITHUB_WEBHOOK_SECRET` | | HMAC secret for `/api/webhooks/github` and token for the Actions reporter |
 | `DEVNEXA_SIM_STEP_DELAY` | `0.8` | Seconds per simulated step, so progress is visible in the UI |
 | `DEVNEXA_EMBEDDING_PROVIDER` | `hashing` | `sentence-transformers` if installed |
-| `DEVNEXA_ADMIN_TOKEN` | | Unlocks the Deploy from GitHub page and API (required in live mode) |
+| `DEVNEXA_ADMIN_TOKEN` | | Unlocks the Deploy from GitHub page and API (live mode needs this or GitHub sign-in) |
+| `DEVNEXA_GITHUB_CLIENT_ID` / `DEVNEXA_GITHUB_CLIENT_SECRET` | | GitHub OAuth app for Sign in with GitHub |
+| `DEVNEXA_GITHUB_ALLOWED_USERS` | | GitHub logins allowed to sign in (empty: first account to sign in is the owner) |
+| `DEVNEXA_PUBLIC_URL` | from request | Dashboard URL, used for the OAuth callback (`https://devnexa.example.com`) |
+| `DEVNEXA_SESSION_SECRET` | generated | Key that signs session cookies (generated and stored in the DB if empty) |
 | `DEVNEXA_APPS_DOMAIN` | | Serve deployed apps at `https://<app>.<domain>` (needs wildcard DNS) |
 | `DEVNEXA_GITHUB_TOKEN` | | Optional default GitHub token (otherwise connect one in the dashboard) |
 | `DEVNEXA_APPS_MEMORY` / `DEVNEXA_APPS_CPUS` | `512m` / `1.0` | Resource limits per deployed app |

@@ -1,5 +1,5 @@
-"""GitHub account connection: a personal access token stored in the kv_store, repo/branch listing,
-and opening a fix pull request on the user's repo (only after a human approves it)."""
+"""GitHub account connection (Sign in with GitHub, or a pasted personal access token), repo/branch listing,
+and pushing fix branches / opening pull requests on the user's repo. Nothing is ever pushed to the base branch."""
 
 from __future__ import annotations
 
@@ -37,12 +37,53 @@ def _call(token: str, method: str, path: str, **kw) -> httpx.Response:
     return r
 
 
-def get_token(db: Session) -> str:
+def user_key(login: str) -> str:
+    return f"{KV_KEY}:user:{login.lower()}"
+
+
+def get_token(db: Session, login: str | None = None) -> str:
+    """The signed-in user's OAuth token if there is one, else the shared connection (pasted token / .env)."""
+    if login:
+        row = db.get(KeyValue, user_key(login))
+        if row and row.value.get("token"):
+            return row.value["token"]
     row = db.get(KeyValue, KV_KEY)
     return (row.value or {}).get("token", "") if row else get_settings().github_token
 
 
-def connection(db: Session) -> dict:
+def profile(token: str) -> tuple[dict, str | None]:
+    r = _call(token, "GET", "/user")
+    if r.status_code != 200:
+        raise GitHubError(f"GitHub returned {r.status_code} for /user.")
+    return r.json(), r.headers.get("x-oauth-scopes")
+
+
+def save_user_token(db: Session, token: str) -> dict:
+    """Store an OAuth token for the account it belongs to (Sign in with GitHub). Returns the profile."""
+    u, scopes = profile(token)
+    value = {"token": token, "login": u.get("login"), "name": u.get("name"), "avatar_url": u.get("avatar_url"),
+             "scopes": scopes, "connected_at": datetime.now(timezone.utc).isoformat(), "source": "oauth"}
+    row = db.get(KeyValue, user_key(value["login"]))
+    if row:
+        row.value = value
+    else:
+        db.add(KeyValue(key=user_key(value["login"]), value=value))
+    # Background work (monitoring fixes, push-to-redeploy) uses the shared connection when it has no user,
+    # so the first sign-in also fills it if nothing was connected before.
+    if not db.get(KeyValue, KV_KEY) and not get_settings().github_token:
+        db.add(KeyValue(key=KV_KEY, value=dict(value)))
+    db.flush()
+    return value
+
+
+def connection(db: Session, login: str | None = None) -> dict:
+    if login:
+        row = db.get(KeyValue, user_key(login))
+        if row and row.value.get("token"):
+            v = row.value
+            return {"connected": True, "login": v.get("login"), "name": v.get("name"),
+                    "avatar_url": v.get("avatar_url"), "scopes": v.get("scopes"), "source": "oauth",
+                    "connected_at": v.get("connected_at"), "token_hint": mask(v["token"])}
     row = db.get(KeyValue, KV_KEY)
     if row and row.value.get("token"):
         v = row.value
@@ -61,12 +102,9 @@ def connect(db: Session, token: str) -> dict:
     token = token.strip()
     if not token:
         raise GitHubError("Paste a GitHub personal access token.")
-    r = _call(token, "GET", "/user")
-    if r.status_code != 200:
-        raise GitHubError(f"GitHub returned {r.status_code} for /user.")
-    u = r.json()
+    u, scopes = profile(token)
     value = {"token": token, "login": u.get("login"), "name": u.get("name"), "avatar_url": u.get("avatar_url"),
-             "scopes": r.headers.get("x-oauth-scopes"), "connected_at": datetime.now(timezone.utc).isoformat()}
+             "scopes": scopes, "connected_at": datetime.now(timezone.utc).isoformat()}
     row = db.get(KeyValue, KV_KEY)
     if row:
         row.value = value
@@ -76,8 +114,9 @@ def connect(db: Session, token: str) -> dict:
     return connection(db)
 
 
-def disconnect(db: Session) -> None:
-    row = db.get(KeyValue, KV_KEY)
+def disconnect(db: Session, login: str | None = None) -> None:
+    row = db.get(KeyValue, user_key(login)) if login else None
+    row = row or db.get(KeyValue, KV_KEY)
     if row:
         db.delete(row)
         db.flush()
@@ -108,26 +147,52 @@ def list_branches(token: str, full_name: str) -> list[str]:
     return [b["name"] for b in r.json()]
 
 
-def open_fix_pr(token: str, full_name: str, base_branch: str, base_sha: str, files: dict[str, str],
-                title: str, body: str, branch: str) -> str:
-    """Commit `files` (path -> new content) to a new branch and open a pull request. Returns its URL."""
+def branch_sha(token: str, full_name: str, branch: str) -> str:
+    r = _call(token, "GET", f"/repos/{full_name}/branches/{branch}")
+    if r.status_code != 200:
+        raise GitHubError(f"GitHub returned {r.status_code} for branch {branch} of {full_name}.", r.status_code)
+    return r.json()["commit"]["sha"]
+
+
+def push_branch(token: str, full_name: str, base_sha: str, files: dict[str, str], branch: str,
+                message: str = "fix: {path} (DevNexa agent)") -> None:
+    """Create `branch` from `base_sha` (or reuse it) and commit `files` (path -> new content) to it."""
     r = _call(token, "POST", f"/repos/{full_name}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": base_sha})
     if r.status_code not in (201, 422):  # 422: branch already exists from an earlier attempt
         raise GitHubError(f"Could not create branch {branch}: GitHub {r.status_code} {r.text[:200]}")
     for path, content in files.items():
         cur = _call(token, "GET", f"/repos/{full_name}/contents/{path}", params={"ref": branch})
-        payload = {"message": f"fix: {path} (DevNexa agent)", "branch": branch,
+        payload = {"message": message.format(path=path), "branch": branch,
                    "content": base64.b64encode(content.encode()).decode()}
         if cur.status_code == 200:
             payload["sha"] = cur.json()["sha"]
         w = _call(token, "PUT", f"/repos/{full_name}/contents/{path}", json=payload)
         if w.status_code not in (200, 201):
             raise GitHubError(f"Could not write {path}: GitHub {w.status_code} {w.text[:200]}")
+
+
+def open_pr(token: str, full_name: str, base_branch: str, branch: str, title: str, body: str,
+            draft: bool = False) -> str:
+    """Open a pull request from `branch`, or return the one already open for it. Returns its URL."""
+    owner = full_name.split("/")[0]
+    cur = _call(token, "GET", f"/repos/{full_name}/pulls", params={"head": f"{owner}:{branch}", "state": "open"})
+    if cur.status_code == 200 and cur.json():
+        return cur.json()[0]["html_url"]
     pr = _call(token, "POST", f"/repos/{full_name}/pulls",
-               json={"title": title, "head": branch, "base": base_branch, "body": body})
+               json={"title": title, "head": branch, "base": base_branch, "body": body, "draft": draft})
+    if pr.status_code == 422 and draft and "draft" in pr.text.lower():  # drafts need a paid plan on private repos
+        pr = _call(token, "POST", f"/repos/{full_name}/pulls",
+                   json={"title": title, "head": branch, "base": base_branch, "body": body})
     if pr.status_code != 201:
         raise GitHubError(f"Could not open the pull request: GitHub {pr.status_code} {pr.text[:200]}")
     return pr.json()["html_url"]
+
+
+def open_fix_pr(token: str, full_name: str, base_branch: str, base_sha: str, files: dict[str, str],
+                title: str, body: str, branch: str) -> str:
+    """Commit `files` (path -> new content) to a new branch and open a pull request. Returns its URL."""
+    push_branch(token, full_name, base_sha, files, branch)
+    return open_pr(token, full_name, base_branch, branch, title, body)
 
 
 def recent_commits(token: str, full_name: str, branch: str = "", limit: int = 5) -> list[dict]:
