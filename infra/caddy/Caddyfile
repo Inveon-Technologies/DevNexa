@@ -13,11 +13,24 @@
 	reverse_proxy frontend:80
 }
 
+# With a wildcard DNS record, www also reaches this server; send it to the dashboard.
+www.{$DEVNEXA_DOMAIN} {
+	redir https://{$DEVNEXA_DOMAIN}{uri} permanent
+}
+
 *.{$DEVNEXA_DOMAIN} {
 	tls {
 		on_demand
 	}
 	encode gzip
+	# One JSON line per request. The backend tails this file for the dashboard's live traffic view.
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 20MiB
+			roll_keep 3
+		}
+		format json
+	}
 	# The backend answers which container serves this hostname (or a "not deployed" page).
 	forward_auth backend:8000 {
 		uri /api/apps/route

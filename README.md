@@ -166,6 +166,19 @@ DEVNEXA_APPS_DOMAIN=devnexa.example.com    # apps at https://<app>.devnexa.examp
 * Without `DEVNEXA_APPS_DOMAIN`, each app is published on a host port instead (`http://<domain>:20000-20999`),
   which needs those ports open in the firewall.
 
+## Live traffic and failing pages
+
+The dashboard opens on what users are doing right now: visitors, requests per minute, error rate and p95 response
+time for every app deployed from GitHub, plus a **Needs attention** list that puts failing pages (5xx), missing
+pages (404), open incidents and pending approvals in one place. **Live traffic** shows the full request log with
+filters for app, time window, errors only and a single page.
+
+How it works: the `caddy` service writes one JSON line per app request to `/var/log/caddy/access.log` (shared
+`caddy_logs` volume). The backend tails that file and keeps the last hour in memory; `GET /api/traffic` serves it.
+Client IPs are masked before they leave the server. Traffic is recorded only for apps served through Caddy, so it
+needs `--profile https` and `DEVNEXA_APPS_DOMAIN`. In simulated mode the dashboard shows generated traffic and
+labels it "Simulated". Set `DEVNEXA_TRAFFIC_SOURCE=off` to disable it.
+
 ## Configuration
 
 All settings are environment variables with the `DEVNEXA_` prefix (see `backend/.env.example`).

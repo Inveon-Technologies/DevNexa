@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .api import apps, auth, cicd, incidents, platform, webhooks
+from .api import apps, auth, cicd, incidents, platform, traffic, webhooks
 from .config import get_settings
 from .db import init_db
 
@@ -20,6 +20,9 @@ async def lifespan(_app: FastAPI):
 
     init_db()
     seed_all(history=settings.seed_demo_data and not settings.is_live)
+    from .services import traffic as traffic_service
+
+    traffic_service.start()
     if settings.is_live:
         from .agents.deploy import start_monitor
 
@@ -40,6 +43,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-for r in (platform.router, cicd.router, incidents.router, webhooks.router, apps.router, auth.router):
+for r in (platform.router, cicd.router, incidents.router, webhooks.router, apps.router, traffic.router,
+          auth.router):
     app.include_router(r)
 
