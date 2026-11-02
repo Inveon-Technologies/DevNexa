@@ -36,9 +36,15 @@ services:
       # GitHub triggers them, otherwise from the checkout mounted below. Also the repo for incident commit evidence.
       DEVNEXA_SAMPLE_APP_SRC: /workspace/sample-app
       DEVNEXA_GITHUB_REPO: ${DEVNEXA_GITHUB_REPO:-Inveon-Technologies/DevNexa}
-      # Deploy from GitHub: the admin key unlocks it in the dashboard. With DEVNEXA_APPS_DOMAIN set (needs a
+      # Deploy from GitHub: Sign in with GitHub (below) or the admin key unlocks it in the dashboard. With DEVNEXA_APPS_DOMAIN set (needs a
       # wildcard DNS record *.<domain>), apps get https://<app>.<domain>; otherwise http://<host>:20000-20999.
       DEVNEXA_ADMIN_TOKEN: ${DEVNEXA_ADMIN_TOKEN:-}
+      # Sign in with GitHub (OAuth app). Callback URL: <DEVNEXA_PUBLIC_URL>/api/auth/github/callback
+      DEVNEXA_GITHUB_CLIENT_ID: ${DEVNEXA_GITHUB_CLIENT_ID:-}
+      DEVNEXA_GITHUB_CLIENT_SECRET: ${DEVNEXA_GITHUB_CLIENT_SECRET:-}
+      DEVNEXA_GITHUB_ALLOWED_USERS: ${DEVNEXA_GITHUB_ALLOWED_USERS:-}
+      DEVNEXA_PUBLIC_URL: ${DEVNEXA_PUBLIC_URL:-}
+      DEVNEXA_SESSION_SECRET: ${DEVNEXA_SESSION_SECRET:-}
       DEVNEXA_GITHUB_TOKEN: ${DEVNEXA_GITHUB_TOKEN:-}
       DEVNEXA_APPS_DOMAIN: ${DEVNEXA_APPS_DOMAIN:-}
       DEVNEXA_APPS_PUBLIC_HOST: ${DEVNEXA_DOMAIN:-localhost}

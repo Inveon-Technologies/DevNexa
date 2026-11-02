@@ -154,7 +154,7 @@ CMD {cmd}
 
 def detect(root: Path, options: dict | None = None) -> BuildPlan:
     options = options or {}
-    if (root / "Dockerfile").exists():
+    if (root / "Dockerfile").exists() and not options.get("ignore_dockerfile"):
         df = _read(root / "Dockerfile")
         port = int(options.get("port") or exposed_port(df) or 80)
         return BuildPlan("dockerfile", port, "Dockerfile", None,

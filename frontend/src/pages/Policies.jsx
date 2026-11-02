@@ -45,6 +45,8 @@ export default function Policies() {
               <Toggle checked={a.auto_execute_low} onChange={(v) => setAuto({ auto_execute_low: v })} label="auto low" /></label>
             <label className="flex items-center justify-between gap-3"><span><span className="block text-sm text-slate-200">Auto-execute medium-risk</span><span className="text-xs text-slate-500">If the action is allowlisted by policy</span></span>
               <Toggle checked={a.auto_execute_medium} onChange={(v) => setAuto({ auto_execute_medium: v })} label="auto medium" /></label>
+            <label className="flex items-center justify-between gap-3"><span><span className="block text-sm text-slate-200">Fix deploys on a new branch</span><span className="text-xs text-slate-500">Push the fix, test it on a preview URL, then open a pull request. Merging stays with you.</span></span>
+              <Toggle checked={a.auto_fix_branch ?? true} onChange={(v) => setAuto({ auto_fix_branch: v })} label="auto fix branch" /></label>
             <div>
               <div className="flex justify-between text-sm"><span className="text-slate-200">Minimum diagnosis confidence</span><span className="font-mono text-xs text-slate-400">{a.min_confidence_for_auto.toFixed(2)}</span></div>
               <input type="range" min="0" max="1" step="0.05" value={a.min_confidence_for_auto} onChange={(e) => setAuto({ min_confidence_for_auto: parseFloat(e.target.value) })} className="mt-2 w-full accent-indigo-400" />
