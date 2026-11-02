@@ -146,3 +146,59 @@ def recent_commits(token: str, full_name: str, branch: str = "", limit: int = 5)
                     "time": (info.get("author") or {}).get("date"), "files": files,
                     "url": c.get("html_url")})
     return out
+
+
+# ------------------------------------------------- fix branches and test URLs
+def branch_sha(token: str, full_name: str, branch: str) -> str:
+    r = _call(token, "GET", f"/repos/{full_name}/git/ref/heads/{branch}")
+    if r.status_code != 200:
+        raise GitHubError(f"Branch {branch} not found on {full_name} (GitHub {r.status_code}).", 404)
+    return r.json()["object"]["sha"]
+
+
+def commit_files(token: str, full_name: str, base_sha: str, branch: str, files: dict[str, str], message: str) -> None:
+    """Create `branch` at `base_sha` (if missing) and commit `files` (path -> full new content) to it."""
+    r = _call(token, "POST", f"/repos/{full_name}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": base_sha})
+    if r.status_code not in (201, 422):  # 422: branch already exists from an earlier attempt
+        raise GitHubError(f"Could not create branch {branch}: GitHub {r.status_code} {r.text[:200]}")
+    for path, content in files.items():
+        cur = _call(token, "GET", f"/repos/{full_name}/contents/{path}", params={"ref": branch})
+        payload = {"message": f"{message}: {path}", "branch": branch,
+                   "content": base64.b64encode(content.encode()).decode()}
+        if cur.status_code == 200:
+            payload["sha"] = cur.json()["sha"]
+        w = _call(token, "PUT", f"/repos/{full_name}/contents/{path}", json=payload)
+        if w.status_code not in (200, 201):
+            raise GitHubError(f"Could not write {path}: GitHub {w.status_code} {w.text[:200]}")
+
+
+def find_or_open_pr(token: str, full_name: str, head: str, base: str, title: str, body: str) -> dict:
+    """Return the open PR for `head` -> `base`, opening one if there is none. {number, url}."""
+    owner = full_name.split("/")[0]
+    r = _call(token, "GET", f"/repos/{full_name}/pulls", params={"head": f"{owner}:{head}", "base": base, "state": "open"})
+    if r.status_code == 200 and r.json():
+        pr = r.json()[0]
+        return {"number": pr["number"], "url": pr["html_url"]}
+    pr = _call(token, "POST", f"/repos/{full_name}/pulls", json={"title": title, "head": head, "base": base, "body": body})
+    if pr.status_code != 201:
+        raise GitHubError(f"Could not open the pull request: GitHub {pr.status_code} {pr.text[:200]}")
+    return {"number": pr.json()["number"], "url": pr.json()["html_url"]}
+
+
+def merge_pr(token: str, full_name: str, number: int, title: str, method: str = "squash") -> str:
+    r = _call(token, "PUT", f"/repos/{full_name}/pulls/{number}/merge",
+              json={"merge_method": method, "commit_title": title})
+    if r.status_code != 200:
+        msg = (r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("message")
+        raise GitHubError(f"GitHub could not merge PR #{number}: {msg or r.status_code}", 409 if r.status_code in (405, 409) else r.status_code)
+    return r.json().get("sha", "")
+
+
+def close_pr(token: str, full_name: str, number: int, comment: str | None = None) -> None:
+    if comment:
+        _call(token, "POST", f"/repos/{full_name}/issues/{number}/comments", json={"body": comment})
+    _call(token, "PATCH", f"/repos/{full_name}/pulls/{number}", json={"state": "closed"})
+
+
+def delete_branch(token: str, full_name: str, branch: str) -> None:
+    _call(token, "DELETE", f"/repos/{full_name}/git/refs/heads/{branch}")

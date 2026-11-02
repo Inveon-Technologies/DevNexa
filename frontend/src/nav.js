@@ -1,5 +1,5 @@
 import {
-  BookOpenCheck, FlaskConical, FlaskRound, GitBranch, Gauge, Github, Layers, ListChecks, Rocket, ScrollText, ShieldCheck,
+  BookOpenCheck, FlaskConical, FlaskRound, GitBranch, Gauge, Github, Layers, ListChecks, Radar, Rocket, ScrollText, ShieldCheck,
   Siren, UserCheck,
 } from "lucide-react";
 
@@ -13,6 +13,7 @@ export const NAV = {
   main: [
     { to: "/", label: "Dashboard", icon: Gauge },
     { to: "/deploy", label: "Deploy from GitHub", icon: Github },
+    { to: "/live", label: "Live apps", icon: Radar },
     { to: "/pipelines", label: "Pipelines", icon: GitBranch },
     { to: "/deployments", label: "Deployments", icon: Rocket },
     { to: "/incidents", label: "Incidents", icon: Siren, badge: "open_incidents" },

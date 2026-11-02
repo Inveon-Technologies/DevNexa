@@ -131,6 +131,41 @@ DEVNEXA_APPS_DOMAIN=devnexa.example.com    # apps at https://<app>.devnexa.examp
 * Without `DEVNEXA_APPS_DOMAIN`, each app is published on a host port instead (`http://<domain>:20000-20999`),
   which needs those ports open in the firewall.
 
+## After deploy: live issues, fixes on test URLs, versions and backups
+
+The **Live apps** page (`/live`) is where a deployed app is looked after.
+
+**Live issues.** Each app's issues are grouped by page, with the section they happen in:
+
+* **Browser:** every build adds a small script (`/__devnexa/agent.js`) to the app's static `index.html` (in the
+  build only, never committed). It reports JavaScript errors, failed API calls (5xx or network), images and
+  scripts that fail to load, console errors and warnings, blank pages and empty sections, with the page path,
+  the CSS selector of the section, the element clicked last and the screen size. Server-rendered apps add the
+  `<script>` tag shown under Pipeline settings to their layout.
+* **Point at a problem:** opening the site with `?devnexa-report=1` (or pressing Alt+Shift+R) lets a person click
+  the broken section and say what is wrong; the selector, text and HTML of that section are sent with it.
+* **Server:** the Monitoring Agent turns error lines and HTTP 5xx access-log lines from the container into issues.
+* **Scan pages:** crawls the app's pages and flags HTTP errors, broken assets and pages with no content.
+
+Repeats are one issue with a count, and an issue that comes back after its fix was merged is reopened.
+
+**Fix on a test URL, merge on approval.** "Fix it on a test URL" (or auto-fix, once an error repeats 3 times)
+runs the Fix Agent: it clones the live commit, picks the files related to the page, section and error, asks the
+configured LLM for a minimal patch (or writes a mechanical fix such as a missing dependency), commits it to
+`devnexa/fix-<app>-<issue>`, opens a pull request and deploys that branch to **`https://<app>-pr-<N>.<domain>`**.
+Pushing more commits to the branch redeploys the test URL. **Approve and merge** merges the PR, removes the test
+deployment and redeploys the app; **Reject** closes the PR and removes it. Any branch can get a test URL the same
+way ("Test a branch"). Without an LLM provider only mechanical fixes are possible, and the issue says so.
+
+**Versions and backups.** Every successful deploy of the app's branch (a push, a merged fix, a redeploy) is tagged
+`devnexa-app/<app>:v<N>`; the previous versions are kept as backups (5 by default) and can be put live again with
+one click, without a rebuild. Backup schedules snapshot the running container (`docker commit`) every N hours and
+keep the last K; each schedule can be removed from the page.
+
+**Pipeline settings.** The deploy steps are listed in order; the optional ones can be switched off per app:
+keeping backups, the **load balancer** (2-4 containers of the live version, requests rotated across the healthy
+ones by the router), browser issue capture, and auto-fix.
+
 ## Configuration
 
 All settings are environment variables with the `DEVNEXA_` prefix (see `backend/.env.example`).

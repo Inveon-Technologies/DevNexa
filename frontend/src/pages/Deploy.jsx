@@ -1,7 +1,8 @@
 import {
   Bot, CheckCircle2, Cpu, ExternalLink, GitBranch, Github, KeyRound, Lock, LogOut, MemoryStick, RefreshCw, Rocket,
-  Search, Square, Terminal, Timer, XCircle,
+  Radar, Search, Square, Terminal, Timer, XCircle,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ADMIN_KEY, adminKey, api, operatorName, streamUrl } from "../api";
@@ -319,7 +320,8 @@ function Detail({ id, onSelect, show }) {
             )}
             {dep.error && <p className="mt-2 text-sm text-rose-300">{dep.error}</p>}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            {!dep.options?.preview_of && <Link className="btn-ghost py-1.5 text-xs" to={`/live/${dep.app}`}><Radar className="h-3.5 w-3.5" /> Issues, versions & test URLs</Link>}
             <button className="btn-ghost py-1.5 text-xs" onClick={() => act("redeploy", "Redeploying")} disabled={LIVE.has(dep.status)}><RefreshCw className="h-3.5 w-3.5" /> Redeploy</button>
             {dep.status === "running" && <button className="btn-danger py-1.5 text-xs" onClick={() => window.confirm(`Stop ${dep.app}?`) && act("stop", "Stopped")}><Square className="h-3.5 w-3.5" /> Stop</button>}
           </div>

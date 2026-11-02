@@ -119,6 +119,8 @@ def list_apps(db: Session = Depends(get_db)):
     deps = db.scalars(select(AppDeployment).order_by(AppDeployment.id.desc()).limit(500)).all()
     apps: dict[str, dict] = {}
     for d in deps:
+        if (d.options or {}).get("preview_of"):
+            continue  # test URLs are listed under their app
         a = apps.setdefault(d.app, {"app": d.app, "repo": d.repo, "latest": dep_dict(d), "live": None,
                                     "deployments": 0})
         a["deployments"] += 1
@@ -174,6 +176,10 @@ def stop(dep_id: int, actor: str = "operator", db: Session = Depends(get_db)):
     d = _get(db, dep_id)
     if d.container:
         deploy.executor.run(["docker", "rm", "-f", d.container])
+    if d.status == "running":
+        from ..services import releases
+
+        releases.stop_replicas(db, d.app)
     d.status, d.health = "stopped", "stopped"
     audit(db, actor, "app.stop", "app_deployment", d.id, f"Stopped {d.app}")
     db.commit()
@@ -290,7 +296,9 @@ def route(request: Request, db: Session = Depends(get_db)):
                                                  "finishes; refresh in a moment."), 503, headers={"Retry-After": "5"})
         return HTMLResponse(PAGE.format(title=f"{app} is not running",
                                         text="The last deploy did not succeed. Check its logs in DevNexa."), 503)
-    return Response(status_code=200, headers={"X-Devnexa-Upstream": f"{live.container}:{live.port}"})
+    from ..services import releases
+
+    return Response(status_code=200, headers={"X-Devnexa-Upstream": releases.pick_upstream(db, live)})
 
 
 @router.get("/apps/tls-check", include_in_schema=False)
