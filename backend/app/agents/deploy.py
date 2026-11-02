@@ -19,8 +19,8 @@ from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import session_scope
-from ..models import AppDeployment, KeyValue
-from ..services import app_doctor, buildplan, github, policy
+from ..models import AppDeployment, AppIssue, KeyValue
+from ..services import app_doctor, buildplan, github, issues, policy, releases
 from ..services.audit import audit
 
 log = logging.getLogger("devnexa.deploy")
@@ -202,6 +202,7 @@ def run_deploy(dep_id: int) -> None:
                 out("[detect] generated Dockerfile:")
                 for ln in plan.generated.strip().splitlines():
                     out(f"    {ln}")
+            _inject_issue_capture(root, app, options, out)
             image = f"devnexa-app/{app}:{(sha or 'latest')[:12]}-{dep_id}"
             plan_port, kind = plan.port, plan.kind
             _update(dep_id, status="building", build_kind=kind, image=image, port=plan_port)
@@ -233,6 +234,20 @@ def run_deploy(dep_id: int) -> None:
         shutil.rmtree(work, ignore_errors=True)
         with _buf_lock:
             _buffers.pop(dep_id, None)
+
+
+def _inject_issue_capture(root: Path, app: str, options: dict, out: DeployLog) -> None:
+    """Live issue capture: add DevNexa's small browser script to the app's HTML in this build only."""
+    with session_scope() as db:
+        on = releases.get_settings(db, options.get("preview_of") or app)["steps"]["issue_capture"]
+    if not on:
+        return
+    files = issues.inject_agent(root, app)
+    if files:
+        out(f"[detect] live issue capture added to {', '.join(files)} (switch it off in the app's pipeline settings)")
+    else:
+        out("[detect] no static index.html found; to capture browser issues add "
+            f"{issues.script_tag(app)} to your HTML")
 
 
 def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployLog):
@@ -308,6 +323,7 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
     for c in old_containers:
         executor.run(["docker", "rm", "-f", c])
     out(f"[url] {public_url(app, host_port)}")
+    releases.on_live(dep_id, env, options)
     if options.get("fix_for"):
         finish_fix(dep_id, ok=True, out=out)
 
@@ -636,6 +652,7 @@ def monitor_tick() -> None:
         state = inspect(container) or {}
         sample = {"t": now().isoformat(), "running": bool(state.get("Running"))}
         errors: list[str] = []
+        recent = ""
         if state.get("Running"):
             sample["status"], sample["latency_ms"] = probe(f"http://{container}:{port}/")
             sample.update(_stats(container))
@@ -662,6 +679,31 @@ def monitor_tick() -> None:
                 dep.metrics = dict(m)
         if trip:
             _runtime_incident(dep_id, container, state, restarts)
+        if recent:
+            _capture_server_issues(dep_id, recent)
+    for app in apps_with_replicas():
+        releases.check_replicas(app)
+    releases.run_due_backups()
+
+
+def apps_with_replicas() -> list[str]:
+    with session_scope() as db:
+        return [a for (a,) in db.execute(select(AppDeployment.app).where(AppDeployment.status == "running").distinct())
+                if releases.lb_status(db, a)["replicas"]]
+
+
+def _capture_server_issues(dep_id: int, text: str) -> None:
+    """Error lines and HTTP 5xx responses in the app's logs become live issues; repeated ones get auto-fixed."""
+    from . import fixer, runner
+
+    with session_scope() as db:
+        dep = db.get(AppDeployment, dep_id)
+        found = issues.from_logs(db, dep.app, dep_id, text)
+        auto = [i.id for i in {i.id: i for i in found}.values() if fixer.should_auto_fix(db, i)]
+        for i in auto:
+            db.get(AppIssue, i).fix = {"status": "queued", "started_by": "fix-agent", "at": now().isoformat()}
+    for i in auto:
+        runner.submit(fixer.start_fix, i, "fix-agent")
 
 
 def _verify_restart(db, dep: AppDeployment):

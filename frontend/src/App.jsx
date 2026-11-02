@@ -9,6 +9,7 @@ import FaultLab from "./pages/FaultLab";
 import IncidentDetail from "./pages/IncidentDetail";
 import Incidents from "./pages/Incidents";
 import Knowledge from "./pages/Knowledge";
+import LiveApp, { LiveAppsList } from "./pages/LiveApps";
 import Overview from "./pages/Overview";
 import PipelineDetail from "./pages/PipelineDetail";
 import Pipelines from "./pages/Pipelines";
@@ -24,6 +25,8 @@ export default function App() {
         <Route path="/" element={<Overview />} />
         <Route path="/traffic" element={<Traffic />} />
         <Route path="/deploy" element={<Deploy />} />
+        <Route path="/live" element={<LiveAppsList />} />
+        <Route path="/live/:app" element={<LiveApp />} />
         <Route path="/pipelines" element={<Pipelines />} />
         <Route path="/pipelines/:id" element={<PipelineDetail />} />
         <Route path="/tests" element={<Tests />} />

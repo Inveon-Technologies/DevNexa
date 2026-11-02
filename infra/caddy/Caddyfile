@@ -31,10 +31,17 @@ www.{$DEVNEXA_DOMAIN} {
 		}
 		format json
 	}
-	# The backend answers which container serves this hostname (or a "not deployed" page).
-	forward_auth backend:8000 {
-		uri /api/apps/route
-		copy_headers X-Devnexa-Upstream
+	# Live issue capture: the browser script and its report endpoint are served by DevNexa on every app's domain.
+	handle /__devnexa/* {
+		reverse_proxy backend:8000
 	}
-	reverse_proxy {http.request.header.X-Devnexa-Upstream}
+	handle {
+		# The backend answers which container serves this hostname (or a "not deployed" page). With the load
+		# balancer step on, it rotates through the app's healthy replicas.
+		forward_auth backend:8000 {
+			uri /api/apps/route
+			copy_headers X-Devnexa-Upstream
+		}
+		reverse_proxy {http.request.header.X-Devnexa-Upstream}
+	}
 }

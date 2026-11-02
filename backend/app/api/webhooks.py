@@ -2,7 +2,7 @@
 
 import hashlib
 import hmac
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -44,7 +44,7 @@ async def github_push(request: Request, x_github_event: str = Header("push"),
         return {"ok": True, "ignored": x_github_event}
     payload = await request.json()
     redeploys = redeploy_pushed_apps(db, (payload.get("repository") or {}).get("full_name", ""),
-                                     (payload.get("ref") or "").split("/")[-1])
+                                     (payload.get("ref") or "").removeprefix("refs/heads/"))
     if redeploys:
         db.commit()
         for dep_id in redeploys:
@@ -70,11 +70,20 @@ def redeploy_pushed_apps(db: Session, repo: str, branch: str) -> list[int]:
                                                      AppDeployment.status == "running")).all()
     ids = []
     for d in {d.app: d for d in sorted(running, key=lambda d: d.id)}.values():
+        if _deploy_in_progress(db, d.app):
+            continue  # e.g. DevNexa merged a fix and already started this redeploy
         opts = {k: v for k, v in (d.options or {}).items() if k != "reuse_image"}
+        opts.pop("source", None)
         new = deploy.create_deployment(db, d.repo, d.branch, d.app, d.root_dir, dict(d.env or {}), opts,
                                        actor="github-push")
         ids.append(new.id)
     return ids
+
+
+def _deploy_in_progress(db: Session, app: str) -> bool:
+    since = datetime.now(timezone.utc) - timedelta(minutes=5)
+    return db.scalars(select(AppDeployment.id).where(AppDeployment.app == app, AppDeployment.status.in_(deploy.ACTIVE),
+                                                     AppDeployment.created_at >= since)).first() is not None
 
 
 class StageReport(BaseModel):

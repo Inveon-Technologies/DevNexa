@@ -373,3 +373,77 @@ class AppDeployment(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+# ------------------------------------------------ releases, live issues, previews
+class AppRelease(Base):
+    """A versioned image of an app (v1, v2, ...) or a scheduled backup snapshot. Older ones are kept as backups."""
+
+    __tablename__ = "app_releases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    version: Mapped[int | None] = mapped_column(Integer, nullable=True)   # None for scheduled snapshots
+    label: Mapped[str] = mapped_column(String(60))                        # "v3" or "backup 2026-11-02 10:00"
+    kind: Mapped[str] = mapped_column(String(20), default="release")      # release | snapshot
+    image: Mapped[str] = mapped_column(String(200))
+    deployment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    commit_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(40), default="deploy")     # deploy | push | fix-merge | schedule
+    status: Mapped[str] = mapped_column(String(20), default="live")       # live | backup | removed
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    build_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+
+
+class AppIssue(Base):
+    """A problem seen on a live app: browser errors, blank pages or sections, failing API calls, server errors,
+    or a section a person flagged. Repeats are grouped by fingerprint."""
+
+    __tablename__ = "app_issues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(20))        # browser | server | scan | user
+    kind: Mapped[str] = mapped_column(String(30))          # js_error, api_error, blank_page, server_error, ...
+    severity: Mapped[str] = mapped_column(String(10), default="error")
+    message: Mapped[str] = mapped_column(Text)
+    page: Mapped[str] = mapped_column(String(300), default="/")
+    section: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    selector: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    stack: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sample: Mapped[dict] = mapped_column(JSON, default=dict)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | fixing | in_preview | resolved | ignored
+    deployment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    preview_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fix: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reopened: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+
+
+class AppPreview(Base):
+    """A fix (or any) branch deployed to its own test URL. Approving merges it into the app's branch."""
+
+    __tablename__ = "app_previews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    preview_app: Mapped[str] = mapped_column(String(60))
+    repo: Mapped[str] = mapped_column(String(200))
+    base_branch: Mapped[str] = mapped_column(String(120))
+    branch: Mapped[str] = mapped_column(String(160))
+    issue_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    deployment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="deploying")  # deploying|ready|failed|merged|rejected
+    title: Mapped[str] = mapped_column(String(300), default="")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    decided_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
