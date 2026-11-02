@@ -49,6 +49,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./sample-app:/workspace/sample-app:ro
+      # Caddy's access log for deployed apps, read for the dashboard's live traffic view.
+      - caddy_logs:/var/log/caddy:ro
     <<: *logs
 
   frontend:
@@ -67,6 +69,7 @@ services:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      - caddy_logs:/var/log/caddy
     restart: unless-stopped
 
   sample-app:
@@ -131,3 +134,4 @@ volumes:
   sampledata:
   caddy_data:
   caddy_config:
+  caddy_logs:

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     apps_monitor_interval: float = 15.0
     apps_max_auto_restarts: int = 3
 
+    # Live user traffic on the dashboard. "auto": tail Caddy's access log in live mode, simulate it otherwise.
+    # "caddy" always tails the log, "simulated" always simulates, "off" disables it.
+    traffic_source: str = "auto"
+    traffic_log: str = "/var/log/caddy/access.log"
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
