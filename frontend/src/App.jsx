@@ -14,6 +14,7 @@ import Overview from "./pages/Overview";
 import PipelineDetail from "./pages/PipelineDetail";
 import Pipelines from "./pages/Pipelines";
 import Policies from "./pages/Policies";
+import Servers from "./pages/Servers";
 import System from "./pages/System";
 import Tests from "./pages/Tests";
 import Traffic from "./pages/Traffic";
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/live" element={<LiveAppsList />} />
         <Route path="/live/:app" element={<LiveApp />} />
         <Route path="/trash" element={<Trash />} />
+        <Route path="/servers" element={<Servers />} />
         <Route path="/pipelines" element={<Pipelines />} />
         <Route path="/pipelines/:id" element={<PipelineDetail />} />
         <Route path="/tests" element={<Tests />} />

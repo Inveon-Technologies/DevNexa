@@ -180,6 +180,8 @@ def create_database(db: Session, app: str, engine: str, actor: str) -> AppDataba
         raise ValueError(f"Unknown database engine {engine!r}. Use one of: {', '.join(ENGINES)}.")
     if active_database(db, app):
         raise ValueError(f"{app} already has a database. Delete it first (it goes to the trash).")
+    if remote_server(db, app):
+        raise ValueError(f"{app} runs on a remote server. Managed databases run on the DevNexa host only for now.")
     name = app.replace("-", "_")[:40]
     d = AppDatabase(app=app, engine=engine, container="", volume="", db_name=name, username=name[:30] or "app",
                     password=secrets.token_hex(16), created_by=actor)
@@ -254,7 +256,7 @@ def runtime(app: str) -> tuple[list[str], dict]:
         if st["steps"]["persistent_data"]:
             args += ["-v", f"{data_volume(app)}:/data"]
             env["DATA_DIR"] = "/data"
-        if d:
+        if d and not remote_server(db, app):
             env.update(db_env(d))
     return args, env
 
@@ -274,9 +276,19 @@ def restart_with_new_env(db: Session, app: str, actor: str) -> AppDeployment | N
 
 
 # --------------------------------------------------------------- sources
+def remote_server(db: Session, app: str) -> int | None:
+    """The remote server an app runs on (None: the DevNexa host). Data backups and managed databases are
+    DevNexa-host only for now: backup files and database containers live next to the backend."""
+    from . import servers
+
+    return servers.server_of_app(db, app)
+
+
 def sources(db: Session, app: str) -> list[dict]:
     """What a backup of this app contains, worked out from how the app runs."""
     out = []
+    if remote_server(db, app):
+        return out
     pol = policy(db, app)
     if pol["persistent_data"]:
         out.append({"type": "data", "volume": data_volume(app), "source": f"/data volume ({data_volume(app)})"})
@@ -864,6 +876,7 @@ def overview(db: Session, app: str) -> dict:
     next_run = (datetime.fromisoformat(last) + timedelta(hours=pol["every_hours"])).isoformat() if last else None
     t = trash(db, app)
     return {"policy": pol, "next_run": next_run, "sources": public_sources(db, app),
+            "remote_server": remote_server(db, app),
             "database": database_dict(d) if d else None, "engines": [{"key": k, "title": v["title"]}
                                                                      for k, v in ENGINES.items()],
             "backups": [backup_dict(b) for b in rows],

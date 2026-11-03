@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .api import apps, auth, backups, cicd, incidents, live, platform, traffic, webhooks
+from .api import apps, auth, backups, cicd, incidents, live, platform, servers, traffic, webhooks
 from .config import get_settings
 from .db import init_db
 
@@ -44,6 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 for r in (platform.router, cicd.router, incidents.router, webhooks.router, apps.router, traffic.router,
-          auth.router, live.router, live.public, backups.router):
+          auth.router, live.router, live.public, servers.router, backups.router):
     app.include_router(r)
 

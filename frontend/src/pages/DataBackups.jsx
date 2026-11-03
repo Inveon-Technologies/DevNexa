@@ -176,6 +176,7 @@ export default function DataBackups({ app, show }) {
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
       <Card title="Data backups" icon={Archive} bodyClass=""
         subtitle={<>
+          {d.remote_server ? <>This app runs on a remote server; data backups and managed databases currently cover apps on the DevNexa host only. </> : null}
           {d.sources.length ? <>Each backup holds: {d.sources.map((s) => s.source).join(" + ")}, and notes which version was live.</> : "Nothing to back up yet: switch on the /data volume or add a database."}
           {" "}{bytes(d.total_bytes)} kept{d.trash_count ? <> · <Link to="/trash" className="text-indigo-300 hover:underline">{d.trash_count} in trash</Link></> : ""}.
         </>}

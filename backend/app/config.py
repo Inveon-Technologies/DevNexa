@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     backup_import_max_mb: int = 2048
     trash_days: int = 14
 
+    # Remote servers (deploy targets reached over SSH). Keys are kept in the database and written here with
+    # mode 600 when needed; `servers_ssh_config` (the backend's own ~/.ssh/config) gets an Include line for
+    # them so the Docker CLI can reach each server as DOCKER_HOST=ssh://devnexa-server-<id>.
+    servers_dir: str = "/tmp/devnexa-servers"
+    servers_ssh_config: str = "~/.ssh/config"
+    servers_command_timeout: int = 60
+
     # Live user traffic on the dashboard. "auto": tail Caddy's access log in live mode, simulate it otherwise.
     # "caddy" always tails the log, "simulated" always simulates, "off" disables it.
     traffic_source: str = "auto"
