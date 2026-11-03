@@ -49,6 +49,12 @@ services:
       DEVNEXA_APPS_DOMAIN: ${DEVNEXA_APPS_DOMAIN:-}
       DEVNEXA_APPS_PUBLIC_HOST: ${DEVNEXA_DOMAIN:-localhost}
       DEVNEXA_APPS_NETWORK: devnexa_default
+      # Smart backups, the trash and backup import. Helper containers (pg_dump, mysqldump, mongodump, tar) reach the
+      # backup files through the same named volume.
+      DEVNEXA_BACKUPS_DIR: /var/lib/devnexa/backups
+      DEVNEXA_BACKUPS_VOLUME: devnexa-backups
+      DEVNEXA_TRASH_DAYS: ${DEVNEXA_TRASH_DAYS:-14}
+      DEVNEXA_BACKUP_IMPORT_MAX_MB: ${DEVNEXA_BACKUP_IMPORT_MAX_MB:-2048}
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["8000:8000"]
@@ -57,6 +63,7 @@ services:
       - ./sample-app:/workspace/sample-app:ro
       # Caddy's access log for deployed apps, read for the dashboard's live traffic view.
       - caddy_logs:/var/log/caddy:ro
+      - backups:/var/lib/devnexa/backups
     <<: *logs
 
   frontend:
@@ -141,3 +148,5 @@ volumes:
   caddy_data:
   caddy_config:
   caddy_logs:
+  backups:
+    name: devnexa-backups

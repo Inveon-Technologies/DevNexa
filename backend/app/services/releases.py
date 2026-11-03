@@ -31,6 +31,9 @@ STEPS = [
     {"key": "build", "title": "Build a Docker image", "optional": False},
     {"key": "version", "title": "Tag the image as the next version (v1, v2, ...)", "optional": False},
     {"key": "auto_backup", "title": "Keep earlier versions as backups", "optional": True},
+    {"key": "persistent_data", "title": "Keep app files in a persistent /data volume (survives redeploys)", "optional": True},
+    {"key": "smart_backup", "title": "Smart backups of /data and the database: on a schedule and before each new version",
+     "optional": True},
     {"key": "health", "title": "Start and health-check", "optional": False},
     {"key": "load_balancer", "title": "Load balancer: run replicas and spread traffic", "optional": True},
     {"key": "issue_capture", "title": "Capture live issues from visitors' browsers", "optional": True},
@@ -38,11 +41,18 @@ STEPS = [
 ]
 
 DEFAULTS = {
-    "steps": {"auto_backup": True, "load_balancer": False, "issue_capture": True, "auto_fix": True},
+    "steps": {"auto_backup": True, "persistent_data": True, "smart_backup": True, "load_balancer": False,
+              "issue_capture": True, "auto_fix": True},
     "keep_versions": 5,
     "replicas": 2,
     "backup_schedules": [],
+    # Smart data backups (services/backups.py). Retention keeps the newest `keep_last` plus one per day, week and
+    # month; what it prunes goes to the trash first.
+    "backup_policy": {"every_hours": 24, "keep_last": 7, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 3,
+                      "skip_unchanged": True, "before_changes": True},
 }
+POLICY_LIMITS = {"every_hours": (1, 720), "keep_last": (1, 50), "keep_daily": (0, 60), "keep_weekly": (0, 52),
+                 "keep_monthly": (0, 24)}
 
 
 def now() -> datetime:
@@ -66,6 +76,7 @@ def get_settings(db: Session, app: str) -> dict:
     out = {**DEFAULTS, **saved}
     out["steps"] = {**DEFAULTS["steps"], **(saved.get("steps") or {})}
     out["backup_schedules"] = list(saved.get("backup_schedules") or [])
+    out["backup_policy"] = {**DEFAULTS["backup_policy"], **(saved.get("backup_policy") or {})}
     return out
 
 
@@ -80,9 +91,20 @@ def save_settings(db: Session, app: str, value: dict) -> dict:
 
 
 def update_settings(db: Session, app: str, steps: dict | None = None, keep_versions: int | None = None,
-                    replicas: int | None = None, actor: str = "operator") -> dict:
+                    replicas: int | None = None, actor: str = "operator", backup_policy: dict | None = None) -> dict:
     cur = get_settings(db, app)
     changes = []
+    for k, v in (backup_policy or {}).items():
+        if k in POLICY_LIMITS:
+            lo, hi = POLICY_LIMITS[k]
+            v = max(lo, min(hi, float(v) if k == "every_hours" else int(v)))
+        elif k in ("skip_unchanged", "before_changes"):
+            v = bool(v)
+        else:
+            continue
+        if cur["backup_policy"].get(k) != v:
+            cur["backup_policy"][k] = v
+            changes.append(f"backup {k.replace('_', ' ')} {v}")
     for k, v in (steps or {}).items():
         if k in DEFAULTS["steps"] and cur["steps"].get(k) != bool(v):
             cur["steps"][k] = bool(v)
@@ -267,6 +289,7 @@ def start_replicas(dep_id: int, env: dict, options: dict) -> list[str]:
     from ..agents import deploy
     from ..config import get_settings as cfg
     from ..db import session_scope
+    from . import backups
 
     s = cfg()
     with session_scope() as db:
@@ -282,7 +305,9 @@ def start_replicas(dep_id: int, env: dict, options: dict) -> list[str]:
                "--label", "devnexa.logs=true", "--label", f"devnexa.app={app}", "--label", f"devnexa.deployment={dep_id}",
                "--label", "devnexa.replica=true", "--memory", options.get("memory", s.apps_memory), "--cpus", s.apps_cpus,
                "-e", f"PORT={port}", "-e", "HOST=0.0.0.0"]
-        for k, v in env.items():
+        extra_args, extra_env = backups.runtime(app)
+        cmd += extra_args
+        for k, v in {**extra_env, **env}.items():
             cmd += ["-e", f"{k}={v}"]
         code, _ = ex.run(cmd + [image])
         if code != 0:

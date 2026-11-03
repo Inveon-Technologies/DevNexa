@@ -201,6 +201,19 @@ keep the last K; each schedule can be removed from the page.
 keeping backups, the **load balancer** (2-4 containers of the live version, requests rotated across the healthy
 ones by the router), browser issue capture, and auto-fix.
 
+## Data: smart backups, databases, trash and import
+
+Each app's **Data & backups** tab (Live apps → app) protects the app's data, not just its code:
+
+- **Persistent `/data`.** Apps get a Docker volume `devnexa-data-<app>` at `/data` (`DATA_DIR=/data`), so files they write survive redeploys. Switch it off per app.
+- **Databases.** Add a PostgreSQL, MySQL or MongoDB database to an app in one click: DevNexa runs it next to the app, sets `DATABASE_URL` (and `MONGODB_URI`) and restarts the app on the same image with no downtime. An app that brings its own `DATABASE_URL` / `MONGODB_URI` is backed up too.
+- **Smart backups.** Each backup holds the `/data` files plus a database dump (pg_dump, mysqldump or mongodump, run in short-lived helper containers) and records which version was live. They run on a schedule (daily by default), automatically before a new version goes live, before a restore and before a database is deleted. A content fingerprint skips scheduled backups when nothing changed, every archive is read back and verified, and tiered retention keeps the newest N plus one per day, week and month. Pinned and imported backups are never pruned.
+- **Restore.** Restoring takes a safety backup first, puts the files and/or database back, restarts the app, and can roll the code back to the version that was live at the time.
+- **Trash.** Deleting a backup or a database (or retention pruning a backup) moves it to the **Trash** page for `DEVNEXA_TRASH_DAYS` (14) days. A deleted database keeps its volume, so restoring it is exact. Empty the trash or delete items for good from there.
+- **Import / download.** Download any backup as one `.tar.gz` and import it here or on another DevNexa server. Import also accepts `.sql` / `.sql.gz` dumps, mongodump `.archive` files, folder archives (`.tar.gz`, `.zip`) and SQLite files, up to `DEVNEXA_BACKUP_IMPORT_MAX_MB` (2048). Archives are re-packed on import so links and `../` paths are dropped.
+
+Backup files live in the `devnexa-backups` Docker volume (mounted at `/var/lib/devnexa/backups` in the backend).
+
 ## Live traffic and failing pages
 
 The dashboard opens on what users are doing right now: visitors, requests per minute, error rate and p95 response
