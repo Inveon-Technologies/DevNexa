@@ -20,7 +20,7 @@ from sqlalchemy import select
 from ..config import get_settings
 from ..db import session_scope
 from ..models import AppDeployment, AppIssue, KeyValue
-from ..services import app_doctor, buildplan, github, issues, policy, releases, servers
+from ..services import app_doctor, backups, buildplan, github, issues, policy, releases, servers
 from ..services.audit import audit
 
 log = logging.getLogger("devnexa.deploy")
@@ -253,6 +253,8 @@ def _deploy_steps(dep_id, repo, branch, app, root_dir, env, options, token, out:
         if code != 0:
             raise DeployFailed("build", "docker build failed", text)
 
+    if not (options.get("preview_of") or options.get("fix_for")):
+        backups.before_deploy(app, out)
     _start_and_verify(dep_id, app, image, plan_port, kind, env, options, out)
     out.step("Deployed")
     if plan and plan.generated and not options.get("fix_for"):
@@ -289,7 +291,9 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
            "--label", "devnexa.logs=true", "--label", f"devnexa.app={app}", "--label", f"devnexa.deployment={dep_id}",
            "--memory", options.get("memory", s.apps_memory), "--cpus", s.apps_cpus,
            "-e", f"PORT={port}", "-e", "HOST=0.0.0.0"]
-    for k, v in env.items():
+    extra_args, extra_env = backups.runtime(app)  # persistent /data volume and the app's database URL
+    cmd += extra_args
+    for k, v in {**extra_env, **env}.items():  # the app's own env wins
         cmd += ["-e", f"{k}={v}"]
     if host_port:
         cmd += ["-p", f"{host_port}:{port}"]
@@ -694,6 +698,10 @@ def monitor_tick() -> None:
     for app in apps_with_replicas():
         releases.check_replicas(app)
     releases.run_due_backups()
+    try:
+        backups.run_due()
+    except Exception:  # pragma: no cover - a backup problem must never stop monitoring
+        log.exception("smart backups pass failed")
 
 
 def _monitor_one(dep_id: int, container: str, port: int, host_port: int | None, restarts: int,

@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     apps_monitor_interval: float = 15.0
     apps_max_auto_restarts: int = 3
 
+    # Data backups and the trash. Backup files are written to backups_dir by the backend and read/written by short-lived
+    # helper containers through backups_volume (a named Docker volume mounted at backups_dir in the backend container).
+    # Empty backups_volume: helper containers bind-mount backups_dir itself (DevNexa running directly on the host).
+    backups_dir: str = "./data/backups"
+    backups_volume: str = ""
+    backup_helper_image: str = "alpine:3.20"
+    backup_import_max_mb: int = 2048
+    trash_days: int = 14
+
     # Remote servers (deploy targets reached over SSH). Keys are kept in the database and written here with
     # mode 600 when needed; `servers_ssh_config` (the backend's own ~/.ssh/config) gets an Include line for
     # them so the Docker CLI can reach each server as DOCKER_HOST=ssh://devnexa-server-<id>.
