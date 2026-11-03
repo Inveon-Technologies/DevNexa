@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -195,8 +196,16 @@ def run_deploy(dep_id: int) -> None:
                 plan = buildplan.detect(root, options)
             except buildplan.NotBuildable as e:
                 raise DeployFailed("build", str(e), str(e)) from e
+            if plan.subdir:  # the app lives in a subfolder: build there, and remember it for redeploys
+                root = root / plan.subdir
+                root_dir = f"{root_dir}/{plan.subdir}".strip("/")
+                _update(dep_id, root_dir=root_dir)
+            out(f"[detect] stack: {plan.stack}")
             for n in plan.notes:
                 out(f"[detect] {n}")
+            with session_scope() as db:
+                d = db.get(AppDeployment, dep_id)
+                d.metrics = {**(d.metrics or {}), "stack": {k: v for k, v in plan.to_dict().items() if k != "dockerfile"}}
             if plan.generated:
                 (root / buildplan.GENERATED).write_text(plan.generated)
                 out("[detect] generated Dockerfile:")
@@ -236,6 +245,30 @@ def run_deploy(dep_id: int) -> None:
             _buffers.pop(dep_id, None)
 
 
+def detect_repo(token: str, repo: str, branch: str, root_dir: str = "") -> dict:
+    """Clone the branch and say how DevNexa would build and run it, without building anything."""
+    work = Path(get_settings().apps_workdir) / f"detect-{uuid.uuid4().hex[:10]}"
+    try:
+        work.parent.mkdir(parents=True, exist_ok=True)
+        auth = f"x-access-token:{token}@" if token else ""
+        code, text = executor.run(["git", "clone", "--depth", "1", "--branch", branch,
+                                   f"https://{auth}github.com/{repo}.git", str(work)], timeout=180)
+        if code != 0:
+            raise buildplan.NotBuildable("git clone failed: " + (text.replace(token, "***") if token else text)[-300:])
+        root = work / root_dir.strip("/") if root_dir.strip("/") else work
+        if not root.is_dir():
+            raise buildplan.NotBuildable(f"Folder {root_dir!r} does not exist in the repo.")
+        out = {"languages": buildplan.languages(root), "folders": buildplan.candidates(root)}
+        try:
+            out["plan"] = buildplan.detect(root, {})
+        except buildplan.NotBuildable as e:
+            return {**out, "plan": None, "error": str(e)}
+        out["plan"] = out["plan"].to_dict()
+        return out
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _inject_issue_capture(root: Path, app: str, options: dict, out: DeployLog) -> None:
     """Live issue capture: add DevNexa's small browser script to the app's HTML in this build only."""
     with session_scope() as db:
@@ -270,10 +303,11 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
     if code != 0:
         raise DeployFailed("start", "docker run failed", text)
 
-    out.step(f"Health check on port {port}")
+    need = max(1, s.apps_ready_checks)
+    out.step(f"Health check on port {port} (the current version keeps serving until {need} checks in a row pass)")
     deadline = time.monotonic() + s.apps_health_timeout
-    status = None
-    while True:  # at least one attempt, then retry until the deadline
+    status, passed = None, 0
+    while True:  # at least `need` attempts, then retry until the deadline
         state = inspect(container)
         if state and not state.get("Running"):
             logs = container_logs(container, 200)
@@ -282,8 +316,13 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
                                logs + ("\nOOMKilled" if state.get("OOMKilled") else ""))
         status, ms = probe(f"http://{container}:{port}/")
         if status is not None and status < 500:
-            out(f"[health] GET / -> {status} in {ms} ms")
-            break
+            passed += 1
+            out(f"[health] GET / -> {status} in {ms} ms ({passed}/{need})")
+            if passed >= need:
+                break
+            time.sleep(1)
+            continue
+        passed = 0
         if time.monotonic() >= deadline:
             break
         time.sleep(2)
@@ -320,12 +359,38 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
         if parent and parent.diagnosis:
             _verify_parent(db, parent, f"Deploy #{dep_id} succeeded")
         old_containers = [o.container for o in older if o.container]
-    for c in old_containers:
-        executor.run(["docker", "rm", "-f", c])
+    if old_containers:
+        out(f"[switch] traffic now goes to {container}; {', '.join(old_containers)} drains for "
+            f"{s.apps_drain_seconds:g}s, then stops (zero-downtime rollout)")
+    retire(old_containers)
     out(f"[url] {public_url(app, host_port)}")
     releases.on_live(dep_id, env, options)
     if options.get("fix_for"):
         finish_fix(dep_id, ok=True, out=out)
+    if merge := options.get("merge_after"):  # conflicts were resolved and the merged branch is healthy
+        from . import fixer, runner
+
+        out("[merge] merged branch passed its check; merging the pull request and rolling out")
+        runner.submit(fixer.auto_merge, merge["preview_id"], merge.get("actor", "merge-agent"), merge.get("attempt", 1))
+
+
+def retire(containers: list[str], drain: float | None = None) -> None:
+    """Stop containers that no longer get traffic, after letting in-flight requests finish."""
+    containers = [c for c in containers if c]
+    if not containers:
+        return
+    drain = get_settings().apps_drain_seconds if drain is None else drain
+
+    def stop():
+        for c in containers:
+            executor.run(["docker", "rm", "-f", c])
+
+    if drain <= 0:
+        stop()
+    else:
+        t = threading.Timer(drain, stop)
+        t.daemon = True
+        t.start()
 
 
 def _verify_parent(db, parent: AppDeployment, detail: str):
@@ -440,15 +505,17 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
         action = rem["action"]
         new = None
         result: dict = {}
-        if action in ("retry_deploy", "use_npm_install", "prune_docker", "raise_memory"):
+        if action in ("retry_deploy", "use_npm_install", "prune_docker", "raise_memory", "change_runtime"):
             if action == "use_npm_install":
                 options["npm_install"] = True
+            if action == "change_runtime" and diag.get("runtime_version"):
+                options["runtime_version"] = diag["runtime_version"]
             if action == "raise_memory":
                 cur = re.sub(r"\D", "", options.get("memory", get_settings().apps_memory)) or "512"
                 options["memory"] = f"{int(cur) * 2}m"
             new = create_deployment(db, options=options, **base)
             result = {"detail": f"Started deploy #{new.id}" + (" with " + json.dumps(
-                {k: options[k] for k in ("npm_install", "memory") if k in options}) if action != "retry_deploy" else "")}
+                {k: options[k] for k in ("npm_install", "memory", "runtime_version") if k in options}) if action != "retry_deploy" else "")}
         elif action == "rollback_app":
             good = _last_good(db, dep)
             if not good:
@@ -684,6 +751,75 @@ def monitor_tick() -> None:
     for app in apps_with_replicas():
         releases.check_replicas(app)
     releases.run_due_backups()
+    autodeploy_tick()
+
+
+_last_autodeploy = 0.0
+AUTODEPLOY_KEY = "autodeploy_tried"
+
+
+def autodeploy_tick(force: bool = False) -> list[int]:
+    """Auto-deploy: when an app's branch has a new commit on GitHub (a merged pull request or a push), roll it
+    out, also without the GitHub webhook. Each commit is tried once, so a commit that fails to build does not
+    loop; the next commit is tried again."""
+    global _last_autodeploy
+    s = get_settings()
+    if not force and (s.apps_autodeploy_interval <= 0
+                      or time.monotonic() - _last_autodeploy < s.apps_autodeploy_interval):
+        return []
+    _last_autodeploy = time.monotonic()
+    with session_scope() as db:
+        live: dict[str, AppDeployment] = {}
+        for d in db.scalars(select(AppDeployment).where(AppDeployment.status == "running").order_by(AppDeployment.id)):
+            live[d.app] = d
+        rows = []
+        for app, d in live.items():
+            opts = d.options or {}
+            if not releases.get_settings(db, opts.get("preview_of") or app)["steps"].get("auto_deploy", True):
+                continue
+            rows.append((app, d.repo, d.branch, d.commit_sha or "", opts.get("gh_user")))
+        tried_row = db.get(KeyValue, AUTODEPLOY_KEY)
+        tried = dict(tried_row.value) if tried_row else {}
+    started = []
+    for app, repo, branch, deployed, gh_user in rows:
+        with session_scope() as db:
+            token = github.get_token(db, gh_user)
+        if not token:
+            continue
+        try:
+            sha = github.branch_sha(token, repo, branch)
+        except github.GitHubError:
+            continue
+        if not sha or (deployed and sha.startswith(deployed)) or tried.get(app) == sha:
+            continue
+        with session_scope() as db:
+            busy = db.scalars(select(AppDeployment.id).where(AppDeployment.app == app,
+                                                             AppDeployment.status.in_(ACTIVE))).first()
+            if busy:
+                continue
+            cur = db.scalars(select(AppDeployment).where(AppDeployment.app == app, AppDeployment.status == "running")
+                             .order_by(AppDeployment.id.desc())).first()
+            if not cur:
+                continue
+            opts = {k: v for k, v in (cur.options or {}).items() if k not in ("reuse_image", "source", "merge_after",
+                                                                               "fix_for")}
+            opts["source"] = "auto-deploy"
+            new = create_deployment(db, cur.repo, cur.branch, app, cur.root_dir, dict(cur.env or {}), opts,
+                                    actor="auto-deploy")
+            audit(db, "deploy-agent", "app.autodeploy", "app_deployment", new.id,
+                  f"{app}: {branch} moved to {sha[:7]} (was {deployed[:7] or 'unknown'}); rolling it out")
+            tried[app] = sha
+            row = db.get(KeyValue, AUTODEPLOY_KEY)
+            if row:
+                row.value = dict(tried)
+            else:
+                db.add(KeyValue(key=AUTODEPLOY_KEY, value=dict(tried)))
+            started.append(new.id)
+    from . import runner
+
+    for dep_id in started:
+        runner.submit(run_deploy, dep_id)
+    return started
 
 
 def apps_with_replicas() -> list[str]:

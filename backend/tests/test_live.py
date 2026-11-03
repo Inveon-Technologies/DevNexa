@@ -140,6 +140,8 @@ def _fake_github(monkeypatch, calls):
     monkeypatch.setattr(github, "find_or_open_pr", lambda *a, **k: calls.append(("pr", a[2])) or
                         {"number": 7, "url": "https://github.com/vaibhav/fix-app/pull/7"})
     monkeypatch.setattr(github, "merge_pr", lambda *a, **k: calls.append(("merge", a[2])) or "f00d")
+    monkeypatch.setattr(github, "pr_state", lambda *a, **k: {"merged": False, "mergeable": True,
+                                                             "mergeable_state": "clean", "head_sha": "h"})
     monkeypatch.setattr(github, "close_pr", lambda *a, **k: calls.append(("close", a[2])))
     monkeypatch.setattr(github, "delete_branch", lambda *a, **k: calls.append(("delete", a[2])))
 

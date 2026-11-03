@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     apps_cpus: str = "1.0"
     apps_build_timeout: int = 900
     apps_health_timeout: int = 60
+    # Zero-downtime rollout: a new version takes traffic only after this many health checks in a row pass,
+    # and the version it replaces keeps running this many seconds so requests already in flight can finish.
+    apps_ready_checks: int = 3
+    apps_drain_seconds: float = 10.0
+    # Auto-deploy: how often (seconds) each live app's branch is checked on GitHub for new commits, so a merge
+    # or push is rolled out even without the GitHub webhook. 0 switches the check off.
+    apps_autodeploy_interval: float = 60.0
     apps_monitor_interval: float = 15.0
     apps_max_auto_restarts: int = 3
 

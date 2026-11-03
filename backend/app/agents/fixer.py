@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import session_scope
 from ..models import AppDeployment, AppIssue, AppPreview
-from ..services import app_doctor, github, releases
+from ..services import app_doctor, github, merger, releases
 from ..services.analyzer import LLMAnalyzer, get_analyzer
 from ..services.audit import audit
 
@@ -264,6 +264,8 @@ def sync(db: Session, pv: AppPreview) -> AppPreview:
         return pv
     dep = db.scalars(select(AppDeployment).where(AppDeployment.app == pv.preview_app)
                      .order_by(AppDeployment.id.desc())).first()
+    if pv.status in ("resolving", "conflict") and (not dep or dep.id == pv.deployment_id):
+        return pv  # the Merge Agent is working on (or gave up on) this branch; a new push redeploys it
     if dep:
         pv.deployment_id = dep.id
         pv.status = {"running": "ready", "failed": "failed", "stopped": "stopped"}.get(dep.status, "deploying")
@@ -294,20 +296,38 @@ def _remove_preview_deployments(db: Session, pv: AppPreview) -> None:
 
 
 def approve(db: Session, preview_id: int, actor: str) -> dict:
-    """Merge the tested branch, remove its test deployment and redeploy the app as a new version."""
+    """Merge the tested branch, remove its test deployment and redeploy the app as a new version.
+
+    If the branch conflicts with the base branch, the Merge Agent resolves it first (`resolve_and_merge`, run by
+    the caller in the background): the merged branch is re-tested on the test URL and merged once it is healthy."""
     from . import deploy
 
     pv = db.get(AppPreview, preview_id)
     if not pv:
         raise KeyError("preview not found")
     sync(db, pv)
-    if pv.status != "ready":
+    if pv.status == "resolving":
+        raise ValueError("The Merge Agent is already resolving conflicts on this branch.")
+    if pv.status not in ("ready", "conflict"):
         raise ValueError(f"The test deployment is {pv.status}; approve it once its URL works.")
     token = github.get_token(db)
     if not pv.pr_number:
         pr = github.find_or_open_pr(token, pv.repo, pv.branch, pv.base_branch, pv.title or pv.branch, "Merged from DevNexa.")
         pv.pr_number, pv.pr_url = pr["number"], pr["url"]
-    merge_sha = github.merge_pr(token, pv.repo, pv.pr_number, f"{pv.title or pv.branch} (#{pv.pr_number})")
+    try:
+        state = github.pr_state(token, pv.repo, pv.pr_number)
+    except github.GitHubError:  # cannot read it: let the merge call decide
+        state = {"merged": False, "mergeable": None, "mergeable_state": None, "head_sha": None}
+    merge_sha = state["head_sha"] if state["merged"] else None
+    if not state["merged"]:
+        if state["mergeable"] is False or state["mergeable_state"] == "dirty":
+            return _start_resolving(db, pv, actor, "the branch conflicts with " + pv.base_branch)
+        try:
+            merge_sha = github.merge_pr(token, pv.repo, pv.pr_number, f"{pv.title or pv.branch} (#{pv.pr_number})")
+        except github.GitHubError as e:
+            if e.status != 409:
+                raise
+            return _start_resolving(db, pv, actor, str(e))
     _remove_preview_deployments(db, pv)
     if pv.branch.startswith("devnexa/"):
         github.delete_branch(token, pv.repo, pv.branch)
@@ -325,6 +345,103 @@ def approve(db: Session, preview_id: int, actor: str) -> dict:
     audit(db, actor, "app.preview.merged", "app_preview", pv.id,
           f"Merged PR #{pv.pr_number} ({pv.branch}) into {pv.base_branch}; redeploying {pv.app} as deploy #{dep.id}")
     return {"status": "merged", "deployment_id": dep.id, "pr_url": pv.pr_url}
+
+
+def _start_resolving(db: Session, pv: AppPreview, actor: str, why: str) -> dict:
+    pv.status, pv.note = "resolving", f"Merge blocked ({why}). The Merge Agent is merging {pv.base_branch} into " \
+                                      f"{pv.branch} and resolving conflicts; the result is re-tested before it merges."
+    audit(db, "merge-agent", "app.preview.resolving", "app_preview", pv.id, f"{pv.branch}: {why}")
+    return {"status": "resolving_conflicts", "resolve": pv.id, "pr_url": pv.pr_url}
+
+
+def resolve_and_merge(preview_id: int, actor: str, attempt: int = 1) -> None:
+    """Background: merge the base into the PR branch with conflict resolution, push it, re-test it on the test
+    URL; `run_deploy` calls `auto_merge` once that test deploy is healthy."""
+    from . import deploy, runner
+
+    with session_scope() as db:
+        pv = db.get(AppPreview, preview_id)
+        if attempt > 3:  # the base branch keeps moving, or GitHub keeps reporting a conflict we cannot see
+            pv.status, pv.note = "conflict", "Gave up after 3 merge attempts; merge this pull request on GitHub."
+            return
+        repo, head, base, number = pv.repo, pv.branch, pv.base_branch, pv.pr_number
+        token = github.get_token(db)
+    try:
+        res = merger.update_branch(token, repo, head, base)
+    except merger.MergeError as e:
+        with session_scope() as db:
+            pv = db.get(AppPreview, preview_id)
+            pv.status, pv.note = "conflict", f"Could not merge automatically: {e}"
+            audit(db, "merge-agent", "app.preview.conflict", "app_preview", preview_id, str(e)[:500])
+        if number:
+            try:
+                github.comment_pr(token, repo, number, _merge_comment(
+                    f"DevNexa could not merge `{base}` into `{head}` automatically. A developer needs to resolve:",
+                    [f"`{p}`" for p in e.unresolved] or [str(e)],
+                    [f"`{r['path']}`: {r['strategy']}" for r in e.resolved]))
+            except github.GitHubError:
+                pass
+        return
+    except Exception as e:  # noqa: BLE001 - shown on the preview instead of failing silently
+        log.exception("merge agent crashed on preview %s", preview_id)
+        with session_scope() as db:
+            pv = db.get(AppPreview, preview_id)
+            pv.status, pv.note = "conflict", f"Merge Agent error: {e}"
+        return
+    if res.status == "up_to_date":  # GitHub's mergeability was stale: try the merge again
+        with session_scope() as db:
+            pv = db.get(AppPreview, preview_id)
+            pv.status, pv.note = "ready", res.summary()
+        return auto_merge(preview_id, actor, attempt)
+    if number and res.files:
+        try:
+            github.comment_pr(token, repo, number, _merge_comment(
+                f"DevNexa merged `{base}` into `{head}` and resolved the conflicts below. The branch is being "
+                "re-tested on its test URL and merges automatically once it is healthy.", [],
+                [f"`{f['path']}`: {f['strategy']} ({f['detail']})" for f in res.files]))
+        except github.GitHubError:
+            pass
+    with session_scope() as db:
+        pv = db.get(AppPreview, preview_id)
+        last = db.get(AppDeployment, pv.deployment_id) if pv.deployment_id else None
+        opts = {k: v for k, v in ((last.options if last else None) or {}).items() if k not in ("reuse_image", "source")}
+        opts.update(preview_of=pv.app, preview_id=pv.id, merge_after={"preview_id": pv.id, "actor": actor,
+                                                                         "attempt": attempt})
+        dep = deploy.create_deployment(db, repo, head, pv.preview_app, last.root_dir if last else "",
+                                       dict((last.env if last else None) or {}), opts, actor="merge-agent")
+        pv.deployment_id, pv.status, pv.note = dep.id, "deploying", res.summary() + " Re-testing before merging."
+        audit(db, "merge-agent", "app.preview.resolved", "app_preview", pv.id, res.summary()[:500])
+        dep_id = dep.id
+    runner.submit(deploy.run_deploy, dep_id)
+
+
+def _merge_comment(intro: str, todo: list[str], done: list[str]) -> str:
+    parts = [intro]
+    if todo:
+        parts.append("\n".join(f"- {x}" for x in todo))
+    if done:
+        parts.append("Resolved automatically:\n" + "\n".join(f"- {x}" for x in done))
+    parts.append("---\n_DevNexa Merge Agent_")
+    return "\n\n".join(parts)
+
+
+def auto_merge(preview_id: int, actor: str, attempt: int = 1) -> None:
+    """The re-tested branch is healthy: merge it and roll the app out (the person already approved it)."""
+    from . import deploy, runner
+
+    try:
+        with session_scope() as db:
+            res = approve(db, preview_id, actor)
+    except (ValueError, KeyError, github.GitHubError) as e:
+        with session_scope() as db:
+            pv = db.get(AppPreview, preview_id)
+            if pv:
+                pv.note = f"Re-tested after resolving conflicts, but the merge failed: {e}"
+        return
+    if res.get("resolve"):
+        runner.submit(resolve_and_merge, preview_id, actor, attempt + 1)  # base moved again meanwhile
+    elif res.get("deployment_id"):
+        runner.submit(deploy.run_deploy, res["deployment_id"])
 
 
 def reject(db: Session, preview_id: int, actor: str, reason: str = "") -> dict:
