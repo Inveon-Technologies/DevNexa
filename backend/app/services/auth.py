@@ -1,8 +1,10 @@
-"""Sign in with GitHub: the OAuth web flow, a signed session cookie, and who is allowed in.
+"""Sign in with GitHub: the OAuth web flow, a signed session cookie, user accounts and roles.
 
-Deploying runs code on the server, so only allowed GitHub accounts may sign in: the logins listed in
-DEVNEXA_GITHUB_ALLOWED_USERS, or, when that list is empty, the first account that ever signs in (the owner).
-The OAuth token of each user is kept server side (kv_store) and never sent to the browser."""
+Many people can sign in. Each one is a `User` row: a member sees and deploys only their own repos, apps, servers and
+backups; an admin sees and manages everything and approves new members. Who gets in is DEVNEXA_GITHUB_SIGNUP:
+"approval" (default: anyone with GitHub, but an admin approves them first), "open" or "invite". Admins are
+DEVNEXA_GITHUB_ADMINS, or else the server owner: the first login in DEVNEXA_GITHUB_ALLOWED_USERS, or the first
+account that ever signed in. Each user's OAuth token is kept server side (kv_store) and never sent to the browser."""
 
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import hmac
 import json
 import secrets
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import httpx
@@ -19,7 +22,7 @@ from fastapi import Request
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import KeyValue
+from ..models import KeyValue, User
 
 COOKIE = "devnexa_session"
 STATE_COOKIE = "devnexa_oauth_state"
@@ -29,6 +32,7 @@ TOKEN_URL = "https://github.com/login/oauth/access_token"
 SCOPES = "repo read:user"
 OWNER_KEY = "auth_owner"
 SECRET_KEY = "session_secret"
+SIGNUP_MODES = ("approval", "open", "invite")
 
 
 class AuthError(Exception):
@@ -85,9 +89,16 @@ def session_cookie(db: Session, login: str) -> tuple[str, int]:
     return sign(db, {"login": login, "exp": int(time.time()) + max_age}), max_age
 
 
-def current_user(request: Request, db: Session) -> str | None:
+def session_login(request: Request, db: Session) -> str | None:
+    """The login in a valid session cookie, whatever that account's status is now."""
     data = verify(db, request.cookies.get(COOKIE))
-    return data["login"] if data and is_allowed(db, data["login"], claim=False) else None
+    return data["login"] if data and data.get("login") else None
+
+
+def current_user(request: Request, db: Session) -> str | None:
+    """The signed-in login, if that account may use DevNexa right now (approved and not blocked)."""
+    login = session_login(request, db)
+    return login if login and is_active(db, login) else None
 
 
 def base_url(request: Request) -> str:
@@ -123,25 +134,100 @@ def exchange_code(request: Request, code: str) -> str:
     return data["access_token"]
 
 
+def _logins(value: str) -> list[str]:
+    return [u.strip().lower().lstrip("@") for u in value.split(",") if u.strip()]
+
+
 def allowed_list() -> set[str]:
-    return {u.strip().lower() for u in get_settings().github_allowed_users.split(",") if u.strip()}
+    return set(_logins(get_settings().github_allowed_users))
+
+
+def admin_list() -> set[str]:
+    return set(_logins(get_settings().github_admins))
+
+
+def signup_mode() -> str:
+    mode = get_settings().github_signup.strip().lower()
+    return mode if mode in SIGNUP_MODES else "approval"
 
 
 def owner(db: Session) -> str | None:
+    """The server owner: the account that set DevNexa up. An admin unless DEVNEXA_GITHUB_ADMINS names others."""
     row = db.get(KeyValue, OWNER_KEY)
-    return row.value.get("login") if row else None
+    if row:
+        return row.value.get("login")
+    listed = _logins(get_settings().github_allowed_users)
+    return listed[0] if listed and not admin_list() else None
+
+
+def get_user(db: Session, login: str | None) -> User | None:
+    return db.get(User, login.lower()) if login else None
+
+
+def is_admin(db: Session, login: str | None) -> bool:
+    if not login:
+        return False
+    login = login.lower()
+    if login in admin_list():
+        return True
+    first = owner(db)
+    if first and first.lower() == login:
+        return True
+    u = db.get(User, login)
+    return bool(u and u.role == "admin" and u.status == "active")
+
+
+def is_built_in_admin(db: Session, login: str | None) -> bool:
+    """Admins from .env and the server owner: they cannot be blocked or demoted from the Users page."""
+    login = (login or "").lower()
+    return bool(login) and (login in admin_list() or login == (owner(db) or "").lower())
+
+
+def is_active(db: Session, login: str) -> bool:
+    if is_admin(db, login):
+        return True
+    u = get_user(db, login)
+    return bool(u and u.status == "active")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def admit(db: Session, login: str, profile: dict | None = None) -> User | None:
+    """Sign-in decision for a GitHub account that just authenticated. Returns its User row (status active, pending
+    or blocked), or None when it may not sign in at all (invite-only and not invited)."""
+    profile = profile or {}
+    key = login.lower()
+    u = db.get(User, key)
+    if not u and not admin_list() and not owner(db):
+        db.add(KeyValue(key=OWNER_KEY, value={"login": key}))  # the very first account owns the server
+        db.flush()
+    admin = is_admin(db, key)
+    if not u:
+        mode = signup_mode()
+        if admin or key in allowed_list() or mode == "open":
+            status = "active"
+        elif mode == "approval":
+            status = "pending"
+        else:
+            return None
+        u = User(login=key, display_login=login, role="admin" if admin else "member", status=status)
+        db.add(u)
+    elif u.status == "pending" and (key in allowed_list() or signup_mode() == "open"):
+        u.status = "active"
+    if is_built_in_admin(db, key):
+        u.role, u.status = "admin", "active"
+    u.display_login = profile.get("login") or login
+    u.name, u.avatar_url = profile.get("name"), profile.get("avatar_url")
+    u.last_login_at = _now()
+    db.flush()
+    return u
 
 
 def is_allowed(db: Session, login: str, claim: bool = True) -> bool:
-    login = login.lower()
-    listed = allowed_list()
-    if listed:
-        return login in listed
-    first = owner(db)
-    if first:
-        return first.lower() == login
-    if claim:  # nobody configured and nobody signed in yet: this account becomes the owner
-        db.add(KeyValue(key=OWNER_KEY, value={"login": login}))
-        db.flush()
-        return True
-    return False
+    """Whether `login` may use DevNexa now (kept for callers that only need yes or no)."""
+    if claim:
+        u = admit(db, login)
+        return bool(u and u.status == "active")
+    return is_active(db, login)

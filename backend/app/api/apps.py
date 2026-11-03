@@ -14,36 +14,98 @@ from ..agents import deploy, runner
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import AppDeployment, Server
-from ..services import auth, github, servers
+from ..services import auth, github, owners, servers
 from ..services.audit import audit
 from .serialize import to_dict
 
 router = APIRouter(prefix="/api", tags=["deploy from github"])
 
 
-def require_admin(request: Request, db: Session = Depends(get_db)):
-    """Deploying runs arbitrary code on the host, so these endpoints need a signed-in (allowed) GitHub user
-    or the admin key. With neither configured, they are open only in simulated (local) mode."""
+def _resolve(request: Request, db: Session) -> owners.Viewer | None:
+    """Who is calling: a signed-in, approved GitHub user (admin or member), the admin key, or open local mode.
+    None when nobody valid is signed in."""
     s = get_settings()
-    request.state.user = auth.current_user(request, db)
-    if request.state.user:
-        return
+    login = auth.current_user(request, db)
+    if login:
+        return owners.Viewer(login.lower(), auth.is_admin(db, login))
     given = request.headers.get("x-devnexa-key") or request.query_params.get("key") or ""
     if s.admin_token and given and hmac.compare_digest(given.encode(), s.admin_token.encode()):
+        return owners.ADMIN
+    if not s.admin_token and not auth.enabled() and not s.is_live:
+        return owners.ADMIN  # local / simulated mode with no sign-in set up
+    return None
+
+
+def viewer(request: Request, db: Session) -> owners.Viewer:
+    """The caller, without requiring sign-in (pages that are public but show per-user data)."""
+    v = getattr(request.state, "viewer", None)
+    if v is None:
+        v = _resolve(request, db) or owners.NOBODY
+        request.state.viewer = v
+    return v
+
+
+def require_user(request: Request, db: Session = Depends(get_db)):
+    """Deploying runs arbitrary code on the host, so these endpoints need a signed-in, approved GitHub user or
+    the admin key. With neither configured, they are open only in simulated (local) mode."""
+    s = get_settings()
+    v = _resolve(request, db)
+    if v:
+        request.state.viewer, request.state.user = v, v.login
         return
     if not s.admin_token and not auth.enabled():
-        if s.is_live:
-            raise HTTPException(403, "Set up Sign in with GitHub (DEVNEXA_GITHUB_CLIENT_ID/SECRET) or "
-                                     "DEVNEXA_ADMIN_TOKEN in .env and restart the backend to enable deploys.")
-        return
+        raise HTTPException(403, "Set up Sign in with GitHub (DEVNEXA_GITHUB_CLIENT_ID/SECRET) or "
+                                 "DEVNEXA_ADMIN_TOKEN in .env and restart the backend to enable deploys.")
+    login = auth.session_login(request, db)
+    if login:
+        u = auth.get_user(db, login)
+        if u and u.status == "pending":
+            raise HTTPException(403, "Your account is waiting for an admin to approve it.")
+        raise HTTPException(403, f"@{login} may not use this DevNexa server.")
     raise HTTPException(401, "Sign in with GitHub first." if auth.enabled() else "Admin key required.")
+
+
+def require_admin(request: Request, db: Session = Depends(get_db)):
+    """Server-wide settings and other people's accounts: admins only."""
+    require_user(request, db)
+    if not request.state.viewer.is_admin:
+        raise HTTPException(403, "Only an admin can do this.")
 
 
 def user(request: Request) -> str | None:
     return getattr(request.state, "user", None)
 
 
-admin = [Depends(require_admin)]
+def is_admin(request: Request) -> bool:
+    v = getattr(request.state, "viewer", None)
+    return bool(v and v.is_admin)
+
+
+def check_app(request: Request, db: Session, app: str) -> None:
+    """404 (not 403, so names of other people's apps do not leak) unless the caller may see `app`."""
+    if not owners.can_see_app(db, request.state.viewer, app):
+        raise HTTPException(404, "app not found")
+
+
+def require_app(app: str, request: Request, db: Session = Depends(get_db)):
+    """Path dependency for /apps/{app}/...: signed in, and the app is the caller's (or the caller is an admin)."""
+    require_user(request, db)
+    check_app(request, db, app)
+
+
+def require_deployment(dep_id: int, request: Request, db: Session = Depends(get_db)):
+    require_user(request, db)
+    d = db.get(AppDeployment, dep_id)
+    if not d:
+        raise HTTPException(404, "deployment not found")
+    check_app(request, db, d.app)
+
+
+signed_in = [Depends(require_user)]
+admin_only = [Depends(require_admin)]
+app_scoped = [Depends(require_app)]
+dep_scoped = [Depends(require_deployment)]
+admin = signed_in  # older name
 
 
 def _gh(fn, *a):
@@ -68,20 +130,20 @@ class ConnectRequest(BaseModel):
     token: str
 
 
-@router.get("/github", dependencies=admin)
+@router.get("/github", dependencies=signed_in)
 def github_status(request: Request, db: Session = Depends(get_db)):
     return github.connection(db, user(request))
 
 
-@router.post("/github/connect", dependencies=admin)
+@router.post("/github/connect", dependencies=signed_in)
 def github_connect(req: ConnectRequest, request: Request, db: Session = Depends(get_db)):
-    conn = _gh(github.connect, db, req.token)
+    conn = _gh(github.connect, db, req.token, user(request))
     audit(db, conn.get("login") or "operator", "github.connect", "github", None, f"Connected GitHub as {conn['login']}")
     db.commit()
     return conn
 
 
-@router.delete("/github", dependencies=admin)
+@router.delete("/github", dependencies=signed_in)
 def github_disconnect(request: Request, db: Session = Depends(get_db)):
     github.disconnect(db, user(request))
     audit(db, user(request) or "operator", "github.disconnect", "github", None, "Disconnected GitHub")
@@ -96,12 +158,12 @@ def _token(db: Session, login: str | None = None) -> str:
     return token
 
 
-@router.get("/github/repos", dependencies=admin)
+@router.get("/github/repos", dependencies=signed_in)
 def github_repos(request: Request, db: Session = Depends(get_db)):
     return _gh(github.list_repos, _token(db, user(request)))
 
 
-@router.get("/github/repos/{owner}/{repo}/branches", dependencies=admin)
+@router.get("/github/repos/{owner}/{repo}/branches", dependencies=signed_in)
 def github_branches(owner: str, repo: str, request: Request, db: Session = Depends(get_db)):
     return _gh(github.list_branches, _token(db, user(request)), f"{owner}/{repo}")
 
@@ -133,7 +195,7 @@ class DetectRequest(BaseModel):
     root_dir: str = ""
 
 
-@router.post("/apps/detect", dependencies=admin)
+@router.post("/apps/detect", dependencies=signed_in)
 def detect_stack(req: DetectRequest, request: Request, db: Session = Depends(get_db)):
     """Smart deploy preview: which language, framework, build tool, runtime version and port DevNexa found."""
     from ..services import buildplan
@@ -147,36 +209,56 @@ def detect_stack(req: DetectRequest, request: Request, db: Session = Depends(get
         raise HTTPException(400, str(e)) from e
 
 
-@router.get("/apps", dependencies=admin)
-def list_apps(db: Session = Depends(get_db)):
-    deps = db.scalars(select(AppDeployment).order_by(AppDeployment.id.desc()).limit(500)).all()
+@router.get("/apps", dependencies=signed_in)
+def list_apps(request: Request, db: Session = Depends(get_db)):
+    """The caller's apps (an admin sees everyone's, with the owner)."""
+    seen = owners.visible_apps(db, request.state.viewer)
+    deps = db.scalars(select(AppDeployment).order_by(AppDeployment.id.desc()).limit(2000)).all()
     apps: dict[str, dict] = {}
     for d in deps:
         if (d.options or {}).get("preview_of"):
             continue  # issue-fix test URLs are listed under their app on the Live apps page
-        a = apps.setdefault(d.app, {"app": d.app, "repo": d.repo, "latest": dep_dict(d), "live": None,
-                                    "deployments": 0})
+        if seen is not None and d.app not in seen:
+            continue
+        a = apps.get(d.app)
+        if a is None:
+            a = apps[d.app] = {"app": d.app, "repo": d.repo, "latest": dep_dict(d), "live": None, "deployments": 0,
+                               "owner": owners.app_owner(db, d.app)}
         a["deployments"] += 1
         if d.status == "running" and not a["live"]:
             a["live"] = dep_dict(d)
     return list(apps.values())
 
 
-@router.get("/apps/deployments", dependencies=admin)
-def list_app_deployments(app: str | None = None, limit: int = 50, db: Session = Depends(get_db)):
-    q = select(AppDeployment).order_by(AppDeployment.id.desc()).limit(limit)
+@router.get("/apps/deployments", dependencies=signed_in)
+def list_app_deployments(request: Request, app: str | None = None, limit: int = 50, db: Session = Depends(get_db)):
+    seen = owners.visible_apps(db, request.state.viewer)
+    q = select(AppDeployment).order_by(AppDeployment.id.desc())
     if app:
         q = q.where(AppDeployment.app == app)
-    return [dep_dict(d) for d in db.scalars(q)]
+    if seen is not None:
+        q = q.where(AppDeployment.app.in_(seen or {""}))
+    return [dep_dict(d) for d in db.scalars(q.limit(limit))]
 
 
-@router.post("/apps/deploy", status_code=201, dependencies=admin)
+@router.post("/apps/deploy", status_code=201, dependencies=signed_in)
 def deploy_repo(req: DeployRequest, request: Request, db: Session = Depends(get_db)):
     login = user(request)
+    v = request.state.viewer
+    name = deploy.slugify(req.app or req.repo.split("/")[-1])
+    if owners.PREVIEW_RE.search(name):
+        raise HTTPException(400, "Names ending in -pr-<n>, -fix-<n> or -test-<n> are kept for test URLs. "
+                                 "Pick another app name.")
+    if owners.app_exists(db, name) and not owners.can_see_app(db, v, name):
+        raise HTTPException(409, f"The app name '{name}' is already used by another account. Pick another name.")
+    try:
+        owners.check_app_quota(db, v, name)
+    except owners.QuotaExceeded as e:
+        raise HTTPException(403, str(e)) from e
     options = {"port": req.port} if req.port else {}
     if req.server_id:
         server = db.get(Server, req.server_id)
-        if not server:
+        if not server or not owners.can_see_server(v, server):
             raise HTTPException(404, "server not found")
         if server.status == "offline":
             raise HTTPException(409, f"{server.name} did not answer its last check. Check it on the Servers page.")
@@ -187,8 +269,13 @@ def deploy_repo(req: DeployRequest, request: Request, db: Session = Depends(get_
         raise HTTPException(400, "Connect GitHub first.")
     if login:
         options["gh_user"] = login  # clone, fix branches and PRs use this user's GitHub access
-    dep = deploy.create_deployment(db, req.repo, req.branch, req.app, req.root_dir, req.env, options,
-                                   actor=login or req.actor)
+        # A new app belongs to whoever deploys it; an admin redeploying someone's app keeps it theirs.
+        options["owner"] = owners.app_owner(db, name) or login
+    try:
+        dep = deploy.create_deployment(db, req.repo, req.branch, req.app, req.root_dir, req.env, options,
+                                       actor=login or req.actor)
+    except owners.NameTaken as e:
+        raise HTTPException(409, str(e)) from e
     db.commit()
     runner.submit(deploy.run_deploy, dep.id)
     return dep_dict(dep)
@@ -201,12 +288,12 @@ def _get(db: Session, dep_id: int) -> AppDeployment:
     return d
 
 
-@router.get("/apps/deployments/{dep_id}", dependencies=admin)
+@router.get("/apps/deployments/{dep_id}", dependencies=dep_scoped)
 def get_app_deployment(dep_id: int, db: Session = Depends(get_db)):
     return dep_dict(_get(db, dep_id), full=True)
 
 
-@router.post("/apps/deployments/{dep_id}/redeploy", status_code=201, dependencies=admin)
+@router.post("/apps/deployments/{dep_id}/redeploy", status_code=201, dependencies=dep_scoped)
 def redeploy(dep_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
     actor = user(request) or actor
     d = _get(db, dep_id)
@@ -217,7 +304,7 @@ def redeploy(dep_id: int, request: Request, actor: str = "operator", db: Session
     return dep_dict(new)
 
 
-@router.post("/apps/deployments/{dep_id}/stop", dependencies=admin)
+@router.post("/apps/deployments/{dep_id}/stop", dependencies=dep_scoped)
 def stop(dep_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
     actor = user(request) or actor
     d = _get(db, dep_id)
@@ -241,7 +328,7 @@ class Decision(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/deployments/{dep_id}/remediations/{rem_id}/{verdict}", dependencies=admin)
+@router.post("/apps/deployments/{dep_id}/remediations/{rem_id}/{verdict}", dependencies=dep_scoped)
 def decide(dep_id: int, rem_id: int, verdict: str, body: Decision, request: Request,
            db: Session = Depends(get_db)):
     if verdict not in ("approve", "reject"):
@@ -301,7 +388,7 @@ async def _runtime_stream(container: str, env: dict | None = None):
             proc.kill()
 
 
-@router.get("/apps/deployments/{dep_id}/logs/stream", dependencies=admin)
+@router.get("/apps/deployments/{dep_id}/logs/stream", dependencies=dep_scoped)
 def stream_logs(dep_id: int, source: str = Query("build", pattern="^(build|runtime)$"), db: Session = Depends(get_db)):
     d = _get(db, dep_id)
     if source == "runtime":

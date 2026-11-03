@@ -579,17 +579,21 @@ def purge_backup(db: Session, backup_id: int, actor: str) -> None:
     audit(db, actor, "app.data_backup.purge", "app_backup", b.id, f"{b.app}: {b.label} permanently deleted")
 
 
-def trash(db: Session, app: str | None = None) -> dict:
+def trash(db: Session, app: str | None = None, apps: set[str] | None = None) -> dict:
+    """Trashed backups and databases, of one app, or of the apps in `apps` (None: every app)."""
     qb = select(AppBackup).where(AppBackup.status == "trashed").order_by(AppBackup.trashed_at.desc())
     qd = select(AppDatabase).where(AppDatabase.status == "trashed").order_by(AppDatabase.trashed_at.desc())
     if app:
         qb, qd = qb.where(AppBackup.app == app), qd.where(AppDatabase.app == app)
+    if apps is not None:
+        allowed = apps or {""}
+        qb, qd = qb.where(AppBackup.app.in_(allowed)), qd.where(AppDatabase.app.in_(allowed))
     return {"backups": [backup_dict(b) for b in db.scalars(qb)],
             "databases": [database_dict(d) for d in db.scalars(qd)], "days": get_settings().trash_days}
 
 
-def empty_trash(db: Session, actor: str, app: str | None = None) -> int:
-    t = trash(db, app)
+def empty_trash(db: Session, actor: str, app: str | None = None, apps: set[str] | None = None) -> int:
+    t = trash(db, app, apps)
     for b in t["backups"]:
         purge_backup(db, b["id"], actor)
     for d in t["databases"]:

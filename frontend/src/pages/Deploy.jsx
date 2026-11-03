@@ -18,11 +18,28 @@ function SignIn({ me, onKey }) {
   if (useKey) return <Unlock onDone={onKey} />;
   return (
     <Card title="Sign in" icon={Github}
-      subtitle="Sign in with GitHub, pick one of your repositories, and DevNexa deploys it. Only accounts the server owner allows can sign in.">
+      subtitle={me?.signup === "invite"
+        ? "Sign in with GitHub, pick one of your repositories, and DevNexa deploys it. Only accounts an admin added can sign in."
+        : "Sign in with GitHub, pick one of your repositories, and DevNexa deploys it. You see and manage only your own apps."}>
       <div className="flex flex-wrap items-center gap-3">
         <a className="btn-primary" href="/api/auth/github/login?next=/deploy"><Github className="h-4 w-4" /> Sign in with GitHub</a>
         {me?.admin_key && <button className="btn-ghost text-xs" onClick={() => setUseKey(true)}><KeyRound className="h-3.5 w-3.5" /> Use the admin key instead</button>}
       </div>
+    </Card>
+  );
+}
+
+function Waiting({ me }) {
+  const signOut = async () => { await api.post("/api/auth/logout"); window.location.reload(); };
+  const blocked = me.account_status === "blocked";
+  return (
+    <Card title={blocked ? "Your account is blocked" : "Waiting for approval"} icon={Github}
+      action={<button className="btn-ghost py-1.5 text-xs" onClick={signOut}><LogOut className="h-3.5 w-3.5" /> Sign out</button>}>
+      <p className="text-sm text-slate-300">
+        {blocked
+          ? <>An admin blocked <b>@{me.pending_login}</b> on this DevNexa server.</>
+          : <>You signed in as <b>@{me.pending_login}</b>. An admin of this DevNexa server needs to approve your account before you can deploy. This page unlocks by itself once they do.</>}
+      </p>
     </Card>
   );
 }
@@ -67,7 +84,7 @@ function GitHubCard({ conn, me, reload, show }) {
     await api.post("/api/auth/logout");
     window.location.reload();
   };
-  if (me?.signed_in) {
+  if (me?.signed_in && conn?.connected && conn.source === "oauth") {
     return (
       <Card title="GitHub" icon={Github}
         action={<button className="btn-ghost py-1.5 text-xs" onClick={signOut}><LogOut className="h-3.5 w-3.5" /> Sign out</button>}>
@@ -268,7 +285,7 @@ function serverName(servers, d) {
   return (servers || []).find((s) => s.id === id)?.name || `server #${id}`;
 }
 
-function AppsList({ apps, selected, onSelect, servers }) {
+function AppsList({ apps, selected, onSelect, servers, showOwner }) {
   if (!apps) return <Loading />;
   if (!apps.length) return <Empty title="Nothing deployed yet" icon={Rocket}>Pick a repository to get a live URL.</Empty>;
   return (
@@ -282,7 +299,8 @@ function AppsList({ apps, selected, onSelect, servers }) {
             <button onClick={() => onSelect(d.id)}
               className={`flex w-full flex-col gap-2 px-5 py-3 text-left transition hover:bg-white/[0.03] sm:flex-row sm:items-center ${selected === d.id ? "bg-white/[0.04]" : ""}`}>
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-2 text-sm font-medium text-slate-100">{a.app} <StatusBadge status={d.status} /></p>
+                <p className="flex items-center gap-2 text-sm font-medium text-slate-100">{a.app} <StatusBadge status={d.status} />
+                  {showOwner && <Badge tone="slate">{a.owner ? `@${a.owner}` : "admins"}</Badge>}</p>
                 <p className="truncate text-xs text-slate-500">{a.repo} · {d.branch} · {ago(d.created_at)}{serverName(servers, d) ? ` · on ${serverName(servers, d)}` : ""}</p>
                 {live?.url && <p className="truncate font-mono text-xs text-indigo-300">{live.url}</p>}
               </div>
@@ -501,7 +519,7 @@ function Detail({ id, onSelect, show, servers }) {
 export default function Deploy() {
   const [, force] = useState(0);
   const { data: cfg } = usePoll("/api/apps/config", 0);
-  const { data: me } = usePoll("/api/auth/me", 0);
+  const { data: me } = usePoll("/api/auth/me", 15000);
   const loginError = useMemo(() => new URLSearchParams(window.location.search).get("login_error"), []);
   const unlocked = cfg && me && (!cfg.admin_required || adminKey() || me.signed_in);
   const { data: conn, error: connErr, reload: reloadConn } = usePoll(unlocked ? "/api/github" : null, 0);
@@ -524,7 +542,8 @@ export default function Deploy() {
       {cfg && !cfg.docker_available && <ErrorBox error="Docker is not available to the backend here, so deploys will fail. On the server, the backend container needs /var/run/docker.sock mounted (docker compose does this)." />}
       {cfg?.admin_required && !cfg.admin_configured && !cfg.github_login && <ErrorBox error="Set up Sign in with GitHub (DEVNEXA_GITHUB_CLIENT_ID and DEVNEXA_GITHUB_CLIENT_SECRET) or DEVNEXA_ADMIN_TOKEN in the server's .env and restart the backend to turn on deploys." />}
       {loginError && <ErrorBox error={loginError} />}
-      {!cfg || !me ? <Loading /> : !unlocked ? (cfg.github_login ? <SignIn me={me} onKey={() => force((n) => n + 1)} /> : <Unlock onDone={() => force((n) => n + 1)} />)
+      {!cfg || !me ? <Loading /> : !unlocked && me.pending_login && !adminKey() ? <Waiting me={me} />
+        : !unlocked ? (cfg.github_login ? <SignIn me={me} onKey={() => force((n) => n + 1)} /> : <Unlock onDone={() => force((n) => n + 1)} />)
         : connErr && /admin key|sign in/i.test(connErr) ? (
           <><ErrorBox error="That admin key was not accepted." />{cfg.github_login ? <SignIn me={me} onKey={() => force((n) => n + 1)} /> : <Unlock onDone={() => force((n) => n + 1)} />}</>
         ) : (
@@ -535,7 +554,7 @@ export default function Deploy() {
             {conn?.connected && (
               <Card title="Your apps" icon={Rocket} bodyClass=""
                 subtitle={cfg?.url_mode === "subdomain" ? `Each app gets https://<name>.${cfg.apps_domain}` : "Each app gets its own port on this server"}>
-                <AppsList apps={apps} selected={selected} onSelect={setSelected} servers={servers} />
+                <AppsList apps={apps} selected={selected} onSelect={setSelected} servers={servers} showOwner={me?.is_admin} />
               </Card>
             )}
           </div>

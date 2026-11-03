@@ -7,21 +7,25 @@ from sqlalchemy.orm import Session
 
 from ..agents import runner
 from ..db import get_db
-from ..services import servers
-from .apps import require_admin, user
+from ..services import owners, servers
+from .apps import require_user, user
 
-router = APIRouter(prefix="/api/servers", tags=["remote servers"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/api/servers", tags=["remote servers"], dependencies=[Depends(require_user)])
 
 
 def _err(e: servers.ServerError):
     return HTTPException(e.status, str(e))
 
 
-def _server(db: Session, server_id: int):
+def _server(db: Session, server_id: int, request: Request):
+    """The server, if it is the caller's (admins: any). Someone else's server is a 404."""
     try:
-        return servers.get(db, server_id)
+        s = servers.get(db, server_id)
     except servers.ServerError as e:
         raise _err(e) from e
+    if not owners.can_see_server(request.state.viewer, s):
+        raise HTTPException(404, "server not found")
+    return s
 
 
 class ServerIn(BaseModel):
@@ -57,29 +61,35 @@ class Actor(BaseModel):
 
 
 @router.get("")
-def list_servers(db: Session = Depends(get_db)):
-    return [servers.to_dict(db, s) for s in servers.list_all(db)]
+def list_servers(request: Request, db: Session = Depends(get_db)):
+    """The caller's servers (admins: all of them)."""
+    return [servers.to_dict(db, s) for s in owners.visible_servers(db, request.state.viewer)]
 
 
 @router.post("", status_code=201)
 def add_server(body: ServerIn, request: Request, db: Session = Depends(get_db)):
     try:
+        owners.check_server_quota(db, request.state.viewer)
+    except owners.QuotaExceeded as e:
+        raise HTTPException(403, str(e)) from e
+    try:
         s = servers.create(db, body.name, body.host, body.username.strip(), body.ssh_port, body.private_key,
                            body.address, body.port_base, user(request) or body.actor)
     except servers.ServerError as e:
         raise _err(e) from e
+    s.owner = user(request).lower() if user(request) else None
     db.commit()
     return servers.to_dict(db, s)
 
 
 @router.get("/{server_id}")
-def get_server(server_id: int, db: Session = Depends(get_db)):
-    return servers.to_dict(db, _server(db, server_id))
+def get_server(server_id: int, request: Request, db: Session = Depends(get_db)):
+    return servers.to_dict(db, _server(db, server_id, request))
 
 
 @router.patch("/{server_id}")
 def edit_server(server_id: int, body: ServerPatch, request: Request, db: Session = Depends(get_db)):
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     fields = body.model_dump(exclude={"actor"})
     try:
         servers.update(db, s, user(request) or body.actor, **fields)
@@ -91,7 +101,7 @@ def edit_server(server_id: int, body: ServerPatch, request: Request, db: Session
 
 @router.delete("/{server_id}")
 def remove_server(server_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     try:
         servers.delete(db, s, user(request) or actor)
     except servers.ServerError as e:
@@ -101,9 +111,9 @@ def remove_server(server_id: int, request: Request, actor: str = "operator", db:
 
 
 @router.post("/{server_id}/check")
-def check_server(server_id: int, db: Session = Depends(get_db)):
+def check_server(server_id: int, request: Request, db: Session = Depends(get_db)):
     """Log in over SSH and read the machine: OS, CPU, memory, disk, Docker and its containers."""
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     result = servers.check(db, s)
     db.commit()
     return {**result, "server": servers.to_dict(db, s)}
@@ -112,7 +122,7 @@ def check_server(server_id: int, db: Session = Depends(get_db)):
 @router.post("/{server_id}/exec")
 def exec_command(server_id: int, body: CommandIn, request: Request, db: Session = Depends(get_db)):
     """Run one shell command on the server as its SSH user (audited)."""
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     try:
         out = servers.run_command(db, s, body.command, user(request) or body.actor, body.timeout)
     except servers.ServerError as e:
@@ -124,7 +134,7 @@ def exec_command(server_id: int, body: CommandIn, request: Request, db: Session 
 @router.post("/{server_id}/containers/{container}/{action}")
 def container_action(server_id: int, container: str, action: str, body: Actor, request: Request,
                      db: Session = Depends(get_db)):
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     try:
         out = servers.container_action(db, s, container, action, user(request) or body.actor)
     except servers.ServerError as e:
@@ -135,7 +145,7 @@ def container_action(server_id: int, container: str, action: str, body: Actor, r
 
 @router.post("/{server_id}/install-docker", status_code=202)
 def install_docker(server_id: int, body: Actor, request: Request, db: Session = Depends(get_db)):
-    s = _server(db, server_id)
+    s = _server(db, server_id, request)
     if (s.job or {}).get("status") == "running":
         raise HTTPException(409, "A job is already running on this server.")
     runner.submit(servers.install_docker, server_id, user(request) or body.actor)

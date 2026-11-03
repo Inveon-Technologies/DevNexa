@@ -14,6 +14,7 @@ from ..services.audit import audit
 from ..services.embeddings import get_embedder
 from ..services.retrieval import search_similar
 from .serialize import many, to_dict
+from .apps import admin_only
 
 router = APIRouter(prefix="/api", tags=["incidents"])
 
@@ -63,7 +64,7 @@ class ReanalyzeRequest(BaseModel):
     reject_current: bool = True
 
 
-@router.post("/incidents/{incident_id}/reanalyze")
+@router.post("/incidents/{incident_id}/reanalyze", dependencies=admin_only)
 def reanalyze(incident_id: int, req: ReanalyzeRequest, db: Session = Depends(get_db)):
     i = db.get(Incident, incident_id)
     if not i:
@@ -83,7 +84,7 @@ def reanalyze(incident_id: int, req: ReanalyzeRequest, db: Session = Depends(get
     return {"ok": True, "excluded": sorted(set(excluded))}
 
 
-@router.post("/incidents/{incident_id}/close")
+@router.post("/incidents/{incident_id}/close", dependencies=admin_only)
 def close_incident(incident_id: int, actor: str = "operator", note: str = "", db: Session = Depends(get_db)):
     i = db.get(Incident, incident_id)
     if not i:
@@ -142,12 +143,12 @@ def _decide(action_id: int, approve: bool, dec: Decision, db: Session):
     return to_dict(a)
 
 
-@router.post("/actions/{action_id}/approve")
+@router.post("/actions/{action_id}/approve", dependencies=admin_only)
 def approve(action_id: int, dec: Decision, db: Session = Depends(get_db)):
     return _decide(action_id, True, dec, db)
 
 
-@router.post("/actions/{action_id}/reject")
+@router.post("/actions/{action_id}/reject", dependencies=admin_only)
 def reject(action_id: int, dec: Decision, db: Session = Depends(get_db)):
     return _decide(action_id, False, dec, db)
 
@@ -174,7 +175,7 @@ class KnowledgePatch(BaseModel):
     actor: str = "operator"
 
 
-@router.patch("/knowledge/{kid}")
+@router.patch("/knowledge/{kid}", dependencies=admin_only)
 def patch_knowledge(kid: int, body: KnowledgePatch, db: Session = Depends(get_db)):
     k = db.get(KnowledgeEntry, kid)
     if not k:

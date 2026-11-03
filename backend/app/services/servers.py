@@ -520,6 +520,6 @@ def to_dict(db: Session, server: Server) -> dict:
             "port_base": server.port_base, "status": server.status, "error": server.error,
             "facts": server.facts or {}, "job": server.job, "public_key": server.public_key,
             "authorize_command": authorize_command(server), "host_key_trusted": bool(server.known_hosts),
-            "apps": apps_on(db, server.id), "created_by": server.created_by,
+            "apps": apps_on(db, server.id), "created_by": server.created_by, "owner": server.owner,
             "created_at": server.created_at.isoformat() if server.created_at else None,
             "checked_at": server.checked_at.isoformat() if server.checked_at else None}

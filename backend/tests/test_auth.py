@@ -4,7 +4,7 @@ import pytest
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import KeyValue
+from app.models import KeyValue, User
 from app.services import auth, github
 
 
@@ -15,6 +15,14 @@ def oauth(client, monkeypatch):
     monkeypatch.setattr(s, "github_client_secret", "shh")
     monkeypatch.setattr(s, "public_url", "http://testserver")
     monkeypatch.setattr(s, "github_allowed_users", "VaibhavPetkar")
+    monkeypatch.setattr(s, "github_admins", "")
+    monkeypatch.setattr(s, "github_signup", "approval")
+    with SessionLocal() as db:  # every test starts with no accounts and no owner
+        db.query(User).delete()
+        row = db.get(KeyValue, auth.OWNER_KEY)
+        if row:
+            db.delete(row)
+        db.commit()
     monkeypatch.setattr(auth, "exchange_code", lambda request, code: f"gho_token_for_{code}")
     monkeypatch.setattr(github, "profile", lambda token: ({"login": token.removeprefix("gho_token_for_"),
                                                            "name": "V", "avatar_url": "a"}, "repo, read:user"))
@@ -37,11 +45,12 @@ def sign_in(client, login):
 def test_sign_in_with_github_unlocks_deploys_with_the_users_token(client, oauth):
     assert client.get("/api/apps").status_code == 401
     assert client.get("/api/auth/me").json() == {"signed_in": False, "login": None, "github_login": True,
-                                                 "admin_key": False}
+                                                 "admin_key": False, "signup": "approval"}
     r = sign_in(client, "vaibhavpetkar")
     assert r.status_code == 302 and r.headers["location"] == "/deploy"
     me = client.get("/api/auth/me").json()
     assert me["signed_in"] and me["login"] == "vaibhavpetkar"
+    assert me["role"] == "admin"  # the first allow-listed login is the server owner
     assert client.get("/api/apps").status_code == 200
     assert client.get("/api/github").json()["source"] == "oauth"
     client.get("/api/github/repos")
@@ -52,12 +61,14 @@ def test_sign_in_with_github_unlocks_deploys_with_the_users_token(client, oauth)
     assert client.get("/api/apps").status_code == 401
 
 
-def test_accounts_not_on_the_allow_list_are_refused(client, oauth):
+def test_invite_only_refuses_accounts_not_on_the_allow_list(client, oauth, monkeypatch):
+    monkeypatch.setattr(get_settings(), "github_signup", "invite")
     r = sign_in(client, "stranger")
     assert "login_error=" in r.headers["location"] and "stranger" in r.headers["location"]
     assert client.get("/api/apps").status_code == 401
     with SessionLocal() as db:
         assert db.get(KeyValue, github.user_key("stranger")) is None
+        assert db.get(User, "stranger") is None
 
 
 def test_state_must_match(client, oauth):
@@ -69,14 +80,12 @@ def test_state_must_match(client, oauth):
 
 def test_first_account_becomes_owner_without_allow_list(client, oauth, monkeypatch):
     monkeypatch.setattr(get_settings(), "github_allowed_users", "")
-    with SessionLocal() as db:
-        row = db.get(KeyValue, auth.OWNER_KEY)
-        if row:
-            db.delete(row)
-            db.commit()
     assert sign_in(client, "firstuser").headers["location"] == "/deploy"
+    assert client.get("/api/auth/me").json()["role"] == "admin"
     client.cookies.clear()
-    assert "login_error=" in sign_in(client, "seconduser").headers["location"]
+    sign_in(client, "seconduser")  # approval mode: they get in line, they are not the owner
+    me = client.get("/api/auth/me").json()
+    assert not me["signed_in"] and me["account_status"] == "pending"
 
 
 def test_tampered_session_cookie_is_rejected(client, oauth):

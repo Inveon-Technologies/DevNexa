@@ -14,6 +14,7 @@ from ..services.environment import get_environment
 from ..services.feedback import changed_modules, pipeline_risk, prioritize_tests
 from ..simulation.catalog import CI_DEFECTS, FAULTS, MODULES
 from .serialize import many, to_dict
+from .apps import admin_only
 
 router = APIRouter(prefix="/api", tags=["ci/cd"])
 
@@ -41,7 +42,7 @@ def list_pipelines(limit: int = 50, db: Session = Depends(get_db)):
     return [run_summary(r) for r in runs]
 
 
-@router.post("/pipelines", status_code=201)
+@router.post("/pipelines", status_code=201, dependencies=admin_only)
 def trigger_pipeline(req: TriggerRequest, db: Session = Depends(get_db)):
     if req.defect and req.defect not in CI_DEFECTS and req.defect not in FAULTS:
         raise HTTPException(400, f"unknown defect {req.defect}")
@@ -68,7 +69,7 @@ def get_pipeline(run_id: int, db: Session = Depends(get_db)):
     return d
 
 
-@router.post("/pipelines/{run_id}/rerun", status_code=201)
+@router.post("/pipelines/{run_id}/rerun", status_code=201, dependencies=admin_only)
 def rerun_pipeline(run_id: int, db: Session = Depends(get_db)):
     r = db.get(PipelineRun, run_id)
     if not r:
@@ -132,7 +133,7 @@ def list_deployments(db: Session = Depends(get_db)):
     return many(db.scalars(select(Deployment).order_by(Deployment.id.desc()).limit(50)))
 
 
-@router.post("/deployments/{dep_id}/rollback")
+@router.post("/deployments/{dep_id}/rollback", dependencies=admin_only)
 def manual_rollback(dep_id: int, actor: str = "operator", db: Session = Depends(get_db)):
     target = db.get(Deployment, dep_id)
     if not target:

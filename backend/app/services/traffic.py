@@ -137,7 +137,9 @@ class TrafficStore:
 
     # ------------------------------------------------------------ query
     def snapshot(self, minutes: int = 30, app: str | None = None, errors_only: bool = False,
-                 recent_limit: int = 50, now: float | None = None, path: str | None = None) -> dict:
+                 recent_limit: int = 50, now: float | None = None, path: str | None = None,
+                 allowed: set[str] | None = None) -> dict:
+        """`allowed`: only count these apps (a member's own); None counts every app."""
         now = now if now is not None else time.time()
         minutes = max(1, min(KEEP_MINUTES, minutes))
         cur = int(now // BUCKET_S)
@@ -145,14 +147,21 @@ class TrafficStore:
             buckets = [self._buckets.get(m) for m in range(cur - minutes + 1, cur + 1)]
             recent = list(self._recent)
 
+        def keep(name: str) -> bool:
+            return (not app or name == app) and (allowed is None or name in allowed)
+
         def view(b: _Bucket | None):
             """The part of a bucket that belongs to the selected app (or all of it)."""
             if b is None:
                 return None
-            if not app:
+            if not app and allowed is None:
                 return b.requests, b.errors, b.client_errors, b.latencies, b.visitors
-            a = b.apps.get(app)
-            return (a.requests, a.errors, a.client_errors, a.latencies, a.visitors) if a else None
+            parts = [a for name, a in b.apps.items() if keep(name)]
+            if not parts:
+                return None
+            return (sum(a.requests for a in parts), sum(a.errors for a in parts),
+                    sum(a.client_errors for a in parts), [x for a in parts for x in a.latencies],
+                    set().union(*[a.visitors for a in parts]))
 
         series = []
         for i, b in enumerate(buckets):
@@ -181,7 +190,7 @@ class TrafficStore:
             if b is None:
                 continue
             for name, a in b.apps.items():
-                if app and name != app:
+                if not keep(name):
                     continue
                 row = apps.setdefault(name, {"app": name, "requests": 0, "errors": 0, "client_errors": 0,
                                              "_lat": [], "_vis": set(), "last_seen": None})
@@ -191,7 +200,7 @@ class TrafficStore:
                 row["_lat"].extend(a.latencies)
                 row["_vis"] |= a.visitors
             for key, n in b.problems.items():
-                if app and key[0] != app:
+                if not keep(key[0]):
                     continue
                 problems[key] += n
                 last_seen[key] = max(last_seen.get(key, 0), b.last_seen[key])
@@ -214,7 +223,7 @@ class TrafficStore:
         problem_rows.sort(key=lambda r: (r["severity"] != "error", -r["count"]))
 
         floor = (cur - minutes + 1) * BUCKET_S
-        feed = [h for h in reversed(recent) if h.ts >= floor and (not app or h.app == app)
+        feed = [h for h in reversed(recent) if h.ts >= floor and keep(h.app)
                 and (not errors_only or h.status >= 400) and (not path or h.path == path)][:recent_limit]
         return {
             "source": self.source,

@@ -39,6 +39,13 @@ AUTO_FIX_MIN_COUNT = 3
 AUTO_FIX_PER_HOUR = 3
 
 
+def _token(db: Session, app: str) -> str:
+    """GitHub access for work on `app`: its owner's own token (admins' shared connection for older apps)."""
+    from ..services import owners
+
+    return github.get_token(db, owners.token_login(db, app))
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -172,7 +179,7 @@ def start_fix(issue_id: int, actor: str = "operator", hint: str | None = None) -
         data = {k: getattr(issue, k) for k in ("id", "app", "kind", "message", "page", "section", "selector",
                                                "stack", "count", "sample")}
         repo, branch, root_dir, sha = base.repo, base.branch, base.root_dir, base.commit_sha
-        token = github.get_token(db)
+        token = _token(db, issue.app)
         issue.status = "fixing"
         issue.fix = {"status": "diagnosing", "started_by": actor, "at": now().isoformat(), "hint": hint}
         audit(db, actor, "app.issue.fix", "app_issue", issue_id, f"Fix Agent started on '{issue.message[:80]}'")
@@ -251,7 +258,7 @@ def preview_branch(db: Session, app: str, branch: str, actor: str) -> int:
         raise KeyError("app not found")
     if branch == base.branch:
         raise ValueError(f"{branch} is the app's own branch; pick another branch to test.")
-    token = github.get_token(db)
+    token = _token(db, app)
     repo, base_branch = base.repo, base.branch
     pr = github.find_or_open_pr(token, repo, branch, base_branch, f"{branch} (DevNexa test URL)",
                                 f"Opened by DevNexa to test `{branch}` at its own URL before merging into `{base_branch}`.")
@@ -316,7 +323,7 @@ def approve(db: Session, preview_id: int, actor: str) -> dict:
         raise ValueError("The Merge Agent is already resolving conflicts on this branch.")
     if pv.status not in ("ready", "conflict"):
         raise ValueError(f"The test deployment is {pv.status}; approve it once its URL works.")
-    token = github.get_token(db)
+    token = _token(db, pv.app)
     if not pv.pr_number:
         pr = github.find_or_open_pr(token, pv.repo, pv.branch, pv.base_branch, pv.title or pv.branch, "Merged from DevNexa.")
         pv.pr_number, pv.pr_url = pr["number"], pr["url"]
@@ -371,7 +378,7 @@ def resolve_and_merge(preview_id: int, actor: str, attempt: int = 1) -> None:
             pv.status, pv.note = "conflict", "Gave up after 3 merge attempts; merge this pull request on GitHub."
             return
         repo, head, base, number = pv.repo, pv.branch, pv.base_branch, pv.pr_number
-        token = github.get_token(db)
+        token = _token(db, pv.app)
     try:
         res = merger.update_branch(token, repo, head, base)
     except merger.MergeError as e:
@@ -456,7 +463,7 @@ def reject(db: Session, preview_id: int, actor: str, reason: str = "") -> dict:
         raise KeyError("preview not found")
     if pv.status in ("merged", "rejected"):
         raise ValueError(f"preview is already {pv.status}")
-    token = github.get_token(db)
+    token = _token(db, pv.app)
     if pv.pr_number and pv.branch.startswith("devnexa/"):
         github.close_pr(token, pv.repo, pv.pr_number, f"Rejected in DevNexa by {actor}." + (f" {reason}" if reason else ""))
         github.delete_branch(token, pv.repo, pv.branch)
@@ -479,7 +486,7 @@ def should_auto_fix(db: Session, issue: AppIssue) -> bool:
         return False  # issues on test URLs belong to the fix being tested
     if not releases.get_settings(db, issue.app)["steps"]["auto_fix"]:
         return False
-    if not github.get_token(db):
+    if not _token(db, issue.app):
         return False
     since = (now() - timedelta(hours=1)).isoformat()
     started = [i for i in db.scalars(select(AppIssue).where(AppIssue.app == issue.app))

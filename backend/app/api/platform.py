@@ -2,7 +2,7 @@ import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,6 +22,7 @@ from ..services.embeddings import get_embedder
 from ..services.environment import get_environment
 from ..simulation.catalog import ACTIONS, FAULTS, SHIP_VIA_PIPELINE
 from .serialize import many, to_dict
+from .apps import admin_only, viewer
 
 router = APIRouter(prefix="/api", tags=["platform"])
 
@@ -48,8 +49,17 @@ def system(db: Session = Depends(get_db)):
     }
 
 
+def _audit_query(request: Request, db: Session):
+    """Admins see the whole audit log; anyone else only what they did themselves."""
+    q = select(AuditLog).order_by(AuditLog.id.desc())
+    v = viewer(request, db)
+    if not v.is_admin:
+        q = q.where(func.lower(AuditLog.actor) == (v.login or "\0"))
+    return q
+
+
 @router.get("/overview")
-def overview(db: Session = Depends(get_db)):
+def overview(request: Request, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     runs = db.scalars(select(PipelineRun).order_by(PipelineRun.id)).all()
     incidents = db.scalars(select(Incident).order_by(Incident.id)).all()
@@ -96,7 +106,7 @@ def overview(db: Session = Depends(get_db)):
         "mttr_trend": mttr_trend,
         "active_deployment": to_dict(active) if active else None,
         "environment": environment_status(),
-        "recent_activity": many(db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(12))),
+        "recent_activity": many(db.scalars(_audit_query(request, db).limit(12))),
     }
 
 
@@ -115,7 +125,7 @@ def environment():
     return environment_status()
 
 
-@router.post("/environment/reset")
+@router.post("/environment/reset", dependencies=admin_only)
 def reset_environment(actor: str = "operator", db: Session = Depends(get_db)):
     env = get_environment()
     env.clear_faults()
@@ -137,7 +147,7 @@ class InjectRequest(BaseModel):
     actor: str = "fault-lab"
 
 
-@router.post("/faults/{fault_id}/inject")
+@router.post("/faults/{fault_id}/inject", dependencies=admin_only)
 def inject_fault(fault_id: str, req: InjectRequest, db: Session = Depends(get_db)):
     if fault_id not in FAULTS:
         raise HTTPException(404, "unknown fault scenario")
@@ -166,7 +176,7 @@ class RulePatch(BaseModel):
     actor: str = "operator"
 
 
-@router.patch("/policies/{action_type}")
+@router.patch("/policies/{action_type}", dependencies=admin_only)
 def patch_rule(action_type: str, body: RulePatch, db: Session = Depends(get_db)):
     rule = db.get(PolicyRule, action_type)
     if not rule:
@@ -183,7 +193,7 @@ def patch_rule(action_type: str, body: RulePatch, db: Session = Depends(get_db))
     return to_dict(rule)
 
 
-@router.put("/policies/autonomy")
+@router.put("/policies/autonomy", dependencies=admin_only)
 def put_autonomy(values: dict, db: Session = Depends(get_db)):
     merged = policy.set_autonomy(db, values)
     audit(db, values.get("actor", "operator"), "policy.autonomy", "policy", None, "Autonomy settings updated", **merged)
@@ -192,8 +202,8 @@ def put_autonomy(values: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/audit")
-def audit_log(limit: int = 200, entity_type: str | None = None, db: Session = Depends(get_db)):
-    q = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+def audit_log(request: Request, limit: int = 200, entity_type: str | None = None, db: Session = Depends(get_db)):
+    q = _audit_query(request, db).limit(limit)
     if entity_type:
         q = q.where(AuditLog.entity_type == entity_type)
     return many(db.scalars(q))
@@ -238,7 +248,7 @@ def _run_experiment_job(exp_id: int, cfg: dict):
         audit(db, "evaluator", f"experiment.{status}", "experiment", exp_id, f"Experiment #{exp_id} {status}")
 
 
-@router.post("/experiments", status_code=201)
+@router.post("/experiments", status_code=201, dependencies=admin_only)
 def create_experiment(req: ExperimentRequest, db: Session = Depends(get_db)):
     cfg = {**DEFAULT_CONFIG, **req.config}
     unknown = set(cfg["scenarios"]) - set(FAULTS)
