@@ -44,6 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 for r in (platform.router, cicd.router, incidents.router, webhooks.router, apps.router, traffic.router,
-          auth.router, live.router, live.public, servers.router, backups.router):
+          auth.router, auth.users, live.router, live.public, servers.router, backups.router):
     app.include_router(r)
 

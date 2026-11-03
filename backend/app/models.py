@@ -523,5 +523,41 @@ class Server(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     job: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    # The GitHub login the server belongs to (only they and admins see it). None: added before multi-user
+    # sign-in, so it belongs to the admins.
+    owner: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
     checked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+# ------------------------------------------------------------ users and ownership
+class User(Base):
+    """A GitHub account that signed in. Their OAuth token is kept separately (kv_store `github:user:<login>`).
+
+    role: admin (sees and manages everything, approves users) | member (sees only their own apps and servers).
+    status: active | pending (signed in, waiting for an admin to approve) | blocked."""
+
+    __tablename__ = "users"
+
+    login: Mapped[str] = mapped_column(String(60), primary_key=True)  # lower case
+    display_login: Mapped[str] = mapped_column(String(60))
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+
+class AppOwner(Base):
+    """Who an app name belongs to. App names are global (each is a subdomain), so the first user to deploy a name
+    keeps it. Test URLs (<app>-pr-N, <app>-fix-N) belong to the owner of their app. Apps with no row were deployed
+    before multi-user sign-in and belong to the admins."""
+
+    __tablename__ = "app_owners"
+
+    app: Mapped[str] = mapped_column(String(60), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(60), index=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)

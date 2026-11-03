@@ -17,8 +17,8 @@ from ..agents import runner
 from ..config import get_settings
 from ..db import get_db
 from ..models import AppDeployment
-from ..services import backups
-from .apps import admin, dep_dict, user
+from ..services import backups, owners
+from .apps import app_scoped, check_app, dep_dict, signed_in, user
 
 router = APIRouter(prefix="/api/live", tags=["backups and trash"])
 
@@ -37,7 +37,7 @@ class ActorBody(BaseModel):
 
 
 # ------------------------------------------------------------------ backups
-@router.get("/apps/{app}/data", dependencies=admin)
+@router.get("/apps/{app}/data", dependencies=app_scoped)
 def data_overview(app: str, db: Session = Depends(get_db)):
     """What gets backed up, the smart backup policy, the backups themselves and the database."""
     _app_or_404(db, app)
@@ -49,7 +49,7 @@ class BackupBody(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
-@router.post("/apps/{app}/data-backups", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/data-backups", status_code=201, dependencies=app_scoped)
 def backup_now(app: str, body: BackupBody, request: Request, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     db.close()
@@ -69,7 +69,7 @@ class RestoreBody(BaseModel):
     parts: list[str] = Field(default_factory=lambda: ["data", "db"])
 
 
-@router.post("/apps/{app}/data-backups/{backup_id}/restore", dependencies=admin)
+@router.post("/apps/{app}/data-backups/{backup_id}/restore", dependencies=app_scoped)
 def restore(app: str, backup_id: int, body: RestoreBody, request: Request):
     try:
         return backups.restore(app, backup_id, _actor(request, body.actor), body.with_code,
@@ -85,7 +85,7 @@ class PinBody(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/data-backups/{backup_id}/pin", dependencies=admin)
+@router.post("/apps/{app}/data-backups/{backup_id}/pin", dependencies=app_scoped)
 def pin(app: str, backup_id: int, body: PinBody, db: Session = Depends(get_db)):
     b = db.get(backups.AppBackup, backup_id)
     if not b or b.app != app:
@@ -95,7 +95,7 @@ def pin(app: str, backup_id: int, body: PinBody, db: Session = Depends(get_db)):
     return backups.backup_dict(b)
 
 
-@router.delete("/apps/{app}/data-backups/{backup_id}", dependencies=admin)
+@router.delete("/apps/{app}/data-backups/{backup_id}", dependencies=app_scoped)
 def delete_backup(app: str, backup_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
     b = db.get(backups.AppBackup, backup_id)
     if not b or b.app != app:
@@ -108,7 +108,7 @@ def delete_backup(app: str, backup_id: int, request: Request, actor: str = "oper
     return backups.backup_dict(b)
 
 
-@router.get("/apps/{app}/data-backups/{backup_id}/download", dependencies=admin)
+@router.get("/apps/{app}/data-backups/{backup_id}/download", dependencies=app_scoped)
 def download(app: str, backup_id: int, db: Session = Depends(get_db)):
     try:
         path, name = backups.export_bundle(db, app, backup_id)
@@ -118,7 +118,7 @@ def download(app: str, backup_id: int, db: Session = Depends(get_db)):
                         background=BackgroundTask(lambda: path.unlink(missing_ok=True)))
 
 
-@router.post("/apps/{app}/data-backups/import", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/data-backups/import", status_code=201, dependencies=app_scoped)
 async def import_backup(app: str, request: Request, filename: str = Query(min_length=1, max_length=200),
                         engine: str | None = Query(default=None, pattern="^(postgres|mysql|mongo)$"),
                         restore_now: bool = False, actor: str = "operator", db: Session = Depends(get_db)):
@@ -164,7 +164,7 @@ class DatabaseBody(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/databases", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/databases", status_code=201, dependencies=app_scoped)
 def add_database(app: str, body: DatabaseBody, request: Request, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     who = _actor(request, body.actor)
@@ -182,7 +182,7 @@ def add_database(app: str, body: DatabaseBody, request: Request, db: Session = D
     return {"database": backups.database_dict(d), "deployment": dep_dict(dep) if dep else None}
 
 
-@router.delete("/apps/{app}/databases/{db_id}", dependencies=admin)
+@router.delete("/apps/{app}/databases/{db_id}", dependencies=app_scoped)
 def delete_database(app: str, db_id: int, request: Request, actor: str = "operator", restart_app: bool = True,
                     db: Session = Depends(get_db)):
     d = db.get(backups.AppDatabase, db_id)
@@ -207,13 +207,26 @@ def _restart(app: str, who: str):
 
 
 # -------------------------------------------------------------------- trash
-@router.get("/trash", dependencies=admin)
-def list_trash(app: str | None = None, db: Session = Depends(get_db)):
-    return backups.trash(db, app)
+def _trash_item(request: Request, db: Session, kind: str, item_id: int) -> None:
+    model = {"backup": backups.AppBackup, "database": backups.AppDatabase}.get(kind)
+    if not model:
+        raise HTTPException(404, "unknown trash item kind")
+    item = db.get(model, item_id)
+    if not item:
+        raise HTTPException(404, f"{kind} not found")
+    check_app(request, db, item.app)
 
 
-@router.post("/trash/{kind}/{item_id}/restore", dependencies=admin)
+@router.get("/trash", dependencies=signed_in)
+def list_trash(request: Request, app: str | None = None, db: Session = Depends(get_db)):
+    if app:
+        check_app(request, db, app)
+    return backups.trash(db, app, owners.visible_apps(db, request.state.viewer))
+
+
+@router.post("/trash/{kind}/{item_id}/restore", dependencies=signed_in)
 def restore_from_trash(kind: str, item_id: int, body: ActorBody, request: Request, db: Session = Depends(get_db)):
+    _trash_item(request, db, kind, item_id)
     who = _actor(request, body.actor)
     try:
         if kind == "backup":
@@ -233,8 +246,9 @@ def restore_from_trash(kind: str, item_id: int, body: ActorBody, request: Reques
     raise HTTPException(404, "unknown trash item kind")
 
 
-@router.delete("/trash/{kind}/{item_id}", dependencies=admin)
+@router.delete("/trash/{kind}/{item_id}", dependencies=signed_in)
 def purge(kind: str, item_id: int, request: Request, actor: str = "operator", db: Session = Depends(get_db)):
+    _trash_item(request, db, kind, item_id)
     who = _actor(request, actor)
     try:
         if kind == "backup":
@@ -249,8 +263,10 @@ def purge(kind: str, item_id: int, request: Request, actor: str = "operator", db
     return {"purged": item_id, "kind": kind}
 
 
-@router.delete("/trash", dependencies=admin)
+@router.delete("/trash", dependencies=signed_in)
 def empty(request: Request, app: str | None = None, actor: str = "operator", db: Session = Depends(get_db)):
-    n = backups.empty_trash(db, _actor(request, actor), app)
+    if app:
+        check_app(request, db, app)
+    n = backups.empty_trash(db, _actor(request, actor), app, owners.visible_apps(db, request.state.viewer))
     db.commit()
     return {"purged": n}

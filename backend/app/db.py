@@ -62,6 +62,31 @@ def init_db() -> None:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
+    add_missing_columns()
+
+
+def add_missing_columns() -> list[str]:
+    """create_all makes new tables but never changes existing ones, so add any nullable column a model gained
+    since the table was created (there are no migrations). Returns the "table.column" names it added."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+    added = []
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have or not col.nullable or col.primary_key:
+                    continue
+                kind = col.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {kind}'))
+                for ix in table.indexes:
+                    if [c.name for c in ix.columns] == [col.name]:
+                        conn.execute(text(f'CREATE INDEX IF NOT EXISTS {ix.name} ON {table.name} ("{col.name}")'))
+                added.append(f"{table.name}.{col.name}")
+    return added
 
 
 def get_db() -> Iterator[Session]:

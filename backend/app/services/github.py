@@ -43,12 +43,23 @@ def user_key(login: str) -> str:
     return f"{KV_KEY}:user:{login.lower()}"
 
 
+def _shared_allowed(db: Session, login: str | None) -> bool:
+    """The shared connection (a pasted token or DEVNEXA_GITHUB_TOKEN) belongs to the admins. Members only ever use
+    their own GitHub access, so they cannot see or push to repos of the person who set the server up."""
+    from . import auth
+
+    return not login or auth.is_admin(db, login)
+
+
 def get_token(db: Session, login: str | None = None) -> str:
-    """The signed-in user's OAuth token if there is one, else the shared connection (pasted token / .env)."""
+    """The user's own token (Sign in with GitHub or a token they pasted). Admins, and background work with no
+    user, fall back to the shared connection (pasted token / .env)."""
     if login:
         row = db.get(KeyValue, user_key(login))
         if row and row.value.get("token"):
             return row.value["token"]
+        if not _shared_allowed(db, login):
+            return ""
     row = db.get(KeyValue, KV_KEY)
     return (row.value or {}).get("token", "") if row else get_settings().github_token
 
@@ -70,9 +81,11 @@ def save_user_token(db: Session, token: str) -> dict:
         row.value = value
     else:
         db.add(KeyValue(key=user_key(value["login"]), value=value))
-    # Background work (monitoring fixes, push-to-redeploy) uses the shared connection when it has no user,
-    # so the first sign-in also fills it if nothing was connected before.
-    if not db.get(KeyValue, KV_KEY) and not get_settings().github_token:
+    # Background work with no user (the sample-app pipelines, legacy apps) uses the shared connection, so an
+    # admin's first sign-in also fills it if nothing was connected before.
+    from . import auth
+
+    if not db.get(KeyValue, KV_KEY) and not get_settings().github_token and auth.is_admin(db, value["login"]):
         db.add(KeyValue(key=KV_KEY, value=dict(value)))
     db.flush()
     return value
@@ -84,13 +97,16 @@ def connection(db: Session, login: str | None = None) -> dict:
         if row and row.value.get("token"):
             v = row.value
             return {"connected": True, "login": v.get("login"), "name": v.get("name"),
-                    "avatar_url": v.get("avatar_url"), "scopes": v.get("scopes"), "source": "oauth",
+                    "avatar_url": v.get("avatar_url"), "scopes": v.get("scopes"), "source": v.get("source", "oauth"),
                     "connected_at": v.get("connected_at"), "token_hint": mask(v["token"])}
+        if not _shared_allowed(db, login):
+            return {"connected": False}
     row = db.get(KeyValue, KV_KEY)
     if row and row.value.get("token"):
         v = row.value
         return {"connected": True, "login": v.get("login"), "name": v.get("name"), "avatar_url": v.get("avatar_url"),
-                "scopes": v.get("scopes"), "connected_at": v.get("connected_at"), "token_hint": mask(v["token"])}
+                "scopes": v.get("scopes"), "connected_at": v.get("connected_at"), "token_hint": mask(v["token"]),
+                "source": "shared"}
     if get_settings().github_token:
         return {"connected": True, "login": None, "source": "env", "token_hint": mask(get_settings().github_token)}
     return {"connected": False}
@@ -100,25 +116,30 @@ def mask(token: str) -> str:
     return f"{token[:4]}…{token[-4:]}" if len(token) > 10 else "…"
 
 
-def connect(db: Session, token: str) -> dict:
+def connect(db: Session, token: str, login: str | None = None) -> dict:
+    """Save a pasted personal access token: as the signed-in user's own token, or (admin key, no user) as the
+    shared connection."""
     token = token.strip()
     if not token:
         raise GitHubError("Paste a GitHub personal access token.")
     u, scopes = profile(token)
     value = {"token": token, "login": u.get("login"), "name": u.get("name"), "avatar_url": u.get("avatar_url"),
              "scopes": scopes, "connected_at": datetime.now(timezone.utc).isoformat()}
-    row = db.get(KeyValue, KV_KEY)
+    key = KV_KEY
+    if login:
+        key, value["source"] = user_key(login), "token"
+    row = db.get(KeyValue, key)
     if row:
         row.value = value
     else:
-        db.add(KeyValue(key=KV_KEY, value=value))
+        db.add(KeyValue(key=key, value=value))
     db.flush()
-    return connection(db)
+    return connection(db, login)
 
 
 def disconnect(db: Session, login: str | None = None) -> None:
-    row = db.get(KeyValue, user_key(login)) if login else None
-    row = row or db.get(KeyValue, KV_KEY)
+    """Forget the user's own token; with no user (admin key), the shared connection."""
+    row = db.get(KeyValue, user_key(login) if login else KV_KEY)
     if row:
         db.delete(row)
         db.flush()

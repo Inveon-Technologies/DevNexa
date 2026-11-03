@@ -165,11 +165,23 @@ can access, clones with that account's access, and pushes fix branches and pull 
    DEVNEXA_GITHUB_CLIENT_ID=Ov23li...
    DEVNEXA_GITHUB_CLIENT_SECRET=...
    DEVNEXA_PUBLIC_URL=https://devnexa.example.com
-   DEVNEXA_GITHUB_ALLOWED_USERS=your-login,teammate   # who may sign in
+   DEVNEXA_GITHUB_ALLOWED_USERS=your-login          # you: the owner and first admin
+   DEVNEXA_GITHUB_SIGNUP=approval                   # approval | open | invite
    ```
 
-Deploying runs code on your server, so only the logins in `DEVNEXA_GITHUB_ALLOWED_USERS` can sign in. If it is
-empty, the first account that signs in becomes the only owner. The OAuth app asks for the `repo` scope (needed to
+**Many users.** Anyone with a GitHub account can sign in. Each user deploys from their own GitHub account and sees
+only their own apps, test URLs, versions, issues, data backups, databases, trash, servers, traffic and audit entries;
+nobody else's (and never the owner's shared GitHub token). App names are global because each one is a subdomain, so
+the first person to deploy a name keeps it. Admins see and manage everything, and the **Users** page (admins only)
+lists every account with buttons to approve, block, or make someone an admin.
+
+Who gets in is `DEVNEXA_GITHUB_SIGNUP`: `approval` (the default: new accounts wait on the Users page until an admin
+approves them), `open` (anyone deploys straight away) or `invite` (only logins in `DEVNEXA_GITHUB_ALLOWED_USERS` or
+added on the Users page). The first login in `DEVNEXA_GITHUB_ALLOWED_USERS` is the server owner and an admin (or set
+`DEVNEXA_GITHUB_ADMINS`); with both empty, the first account that ever signs in is the owner. Server-wide settings
+(risk policy, fault lab, sample-app pipelines, experiments) are admin only. Members can own up to
+`DEVNEXA_USER_MAX_APPS` apps and `DEVNEXA_USER_MAX_SERVERS` servers. Apps and servers created before multi-user
+sign-in belong to the admins. The OAuth app asks for the `repo` scope (needed to
 clone private repos and open pull requests) and `read:user`. Organization repos appear once the organization
 approves the OAuth app (GitHub shows a "Request" button on the consent screen). Tokens stay on the server; the
 browser only gets a signed session cookie. The admin key still works as a fallback.
@@ -305,7 +317,10 @@ All settings are environment variables with the `DEVNEXA_` prefix (see `backend/
 | `DEVNEXA_EMBEDDING_PROVIDER` | `hashing` | `sentence-transformers` if installed |
 | `DEVNEXA_ADMIN_TOKEN` | | Unlocks the Deploy from GitHub page and API (live mode needs this or GitHub sign-in) |
 | `DEVNEXA_GITHUB_CLIENT_ID` / `DEVNEXA_GITHUB_CLIENT_SECRET` | | GitHub OAuth app for Sign in with GitHub |
-| `DEVNEXA_GITHUB_ALLOWED_USERS` | | GitHub logins allowed to sign in (empty: first account to sign in is the owner) |
+| `DEVNEXA_GITHUB_SIGNUP` | `approval` | Who may sign in: `approval` (admin approves new accounts), `open` or `invite` |
+| `DEVNEXA_GITHUB_ALLOWED_USERS` | | Pre-approved GitHub logins; the first is the owner (admin) unless `DEVNEXA_GITHUB_ADMINS` is set |
+| `DEVNEXA_GITHUB_ADMINS` | | Admin logins (see and manage every user's apps, approve users) |
+| `DEVNEXA_USER_MAX_APPS` / `DEVNEXA_USER_MAX_SERVERS` | `10` / `5` | Per-member limits (0: none) |
 | `DEVNEXA_PUBLIC_URL` | from request | Dashboard URL, used for the OAuth callback (`https://devnexa.example.com`) |
 | `DEVNEXA_SESSION_SECRET` | generated | Key that signs session cookies (generated and stored in the DB if empty) |
 | `DEVNEXA_APPS_DOMAIN` | | Serve deployed apps at `https://<app>.<domain>` (needs wildcard DNS) |

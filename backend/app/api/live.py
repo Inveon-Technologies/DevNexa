@@ -13,9 +13,9 @@ from ..agents import fixer, runner
 from ..agents import deploy as deploy_agent
 from ..db import get_db
 from ..models import AppDeployment, AppIssue, AppPreview, AppRelease
-from ..services import github, issues, releases
+from ..services import github, issues, owners, releases
 from ..services.audit import audit
-from .apps import _app_from_host, admin, dep_dict
+from .apps import _app_from_host, app_scoped, check_app, dep_dict, signed_in, user
 from .serialize import to_dict
 
 router = APIRouter(prefix="/api/live", tags=["live apps"])
@@ -44,10 +44,13 @@ def issue_dict(i: AppIssue) -> dict:
 
 
 # ------------------------------------------------------------------ overview
-@router.get("/apps", dependencies=admin)
-def live_apps(db: Session = Depends(get_db)):
-    """Every deployed app (test URLs excluded) with its open issue counts, live version and test URLs."""
-    names = [a for (a,) in db.execute(select(AppDeployment.app).distinct()) if not PREVIEW_RE.search(a)]
+@router.get("/apps", dependencies=signed_in)
+def live_apps(request: Request, db: Session = Depends(get_db)):
+    """The caller's deployed apps (test URLs excluded) with open issue counts, live version and test URLs.
+    Admins see every app."""
+    seen = owners.visible_apps(db, request.state.viewer)
+    names = [a for (a,) in db.execute(select(AppDeployment.app).distinct())
+             if not PREVIEW_RE.search(a) and (seen is None or a in seen)]
     out = []
     for name in sorted(names):
         live = releases.live_deployment(db, name)
@@ -55,24 +58,25 @@ def live_apps(db: Session = Depends(get_db)):
         out.append({"app": name, "live": dep_dict(live) if live else None, "version": rel.label if rel else None,
                     "issues": issues.summary(db, name),
                     "previews": sum(1 for p in db.scalars(select(AppPreview).where(AppPreview.app == name))
-                                    if fixer.sync(db, p).status in ("deploying", "ready"))})
+                                    if fixer.sync(db, p).status in ("deploying", "ready")),
+                    "owner": owners.app_owner(db, name)})
     db.commit()
     return out
 
 
-@router.get("/apps/{app}", dependencies=admin)
+@router.get("/apps/{app}", dependencies=app_scoped)
 def app_overview(app: str, db: Session = Depends(get_db)):
     latest = _app_or_404(db, app)
     live = releases.live_deployment(db, app)
     out = {"app": app, "repo": latest.repo, "branch": latest.branch, "live": dep_dict(live) if live else None,
            "latest": dep_dict(latest), "settings": releases.get_settings(db, app), "steps": releases.STEPS,
            "load_balancer": releases.lb_status(db, app), "issues": issues.summary(db, app),
-           "agent_script": issues.script_tag(app)}
+           "agent_script": issues.script_tag(app), "owner": owners.app_owner(db, app)}
     return out
 
 
 # -------------------------------------------------------------------- issues
-@router.get("/apps/{app}/issues", dependencies=admin)
+@router.get("/apps/{app}/issues", dependencies=app_scoped)
 def list_issues(app: str, status: str = "active", db: Session = Depends(get_db)):
     q = select(AppIssue).where(AppIssue.app == app).order_by(AppIssue.last_seen.desc()).limit(300)
     rows = db.scalars(q).all()
@@ -88,18 +92,19 @@ class FixRequest(BaseModel):
     hint: str | None = Field(default=None, max_length=2000)
 
 
-@router.post("/apps/{app}/issues/{issue_id}/fix", status_code=202, dependencies=admin)
-def fix_issue(app: str, issue_id: int, body: FixRequest, db: Session = Depends(get_db)):
+@router.post("/apps/{app}/issues/{issue_id}/fix", status_code=202, dependencies=app_scoped)
+def fix_issue(app: str, issue_id: int, body: FixRequest, request: Request, db: Session = Depends(get_db)):
     issue = db.get(AppIssue, issue_id)
     if not issue or issue.app != app:
         raise HTTPException(404, "issue not found")
     if issue.status in ("fixing", "in_preview"):
         raise HTTPException(409, "A fix for this issue is already in progress.")
-    if not github.get_token(db):
+    if not github.get_token(db, owners.token_login(db, app)):
         raise HTTPException(400, "Connect GitHub first.")
-    issue.status, issue.fix = "fixing", {"status": "queued", "started_by": body.actor}
+    actor = user(request) or body.actor
+    issue.status, issue.fix = "fixing", {"status": "queued", "started_by": actor}
     db.commit()
-    runner.submit(fixer.start_fix, issue_id, body.actor, body.hint)
+    runner.submit(fixer.start_fix, issue_id, actor, body.hint)
     return issue_dict(db.get(AppIssue, issue_id))
 
 
@@ -108,7 +113,7 @@ class StatusRequest(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/issues/{issue_id}/status", dependencies=admin)
+@router.post("/apps/{app}/issues/{issue_id}/status", dependencies=app_scoped)
 def set_issue_status(app: str, issue_id: int, body: StatusRequest, db: Session = Depends(get_db)):
     issue = db.get(AppIssue, issue_id)
     if not issue or issue.app != app:
@@ -119,7 +124,7 @@ def set_issue_status(app: str, issue_id: int, body: StatusRequest, db: Session =
     return issue_dict(issue)
 
 
-@router.post("/apps/{app}/scan", dependencies=admin)
+@router.post("/apps/{app}/scan", dependencies=app_scoped)
 def scan_pages(app: str, db: Session = Depends(get_db)):
     live = releases.live_deployment(db, app)
     if not live:
@@ -132,7 +137,7 @@ def scan_pages(app: str, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------- test URLs / PRs
-@router.get("/apps/{app}/previews", dependencies=admin)
+@router.get("/apps/{app}/previews", dependencies=app_scoped)
 def list_previews(app: str, db: Session = Depends(get_db)):
     rows = db.scalars(select(AppPreview).where(AppPreview.app == app).order_by(AppPreview.id.desc()).limit(50)).all()
     out = [fixer.preview_dict(db, p) for p in rows]
@@ -145,7 +150,7 @@ class PreviewRequest(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/previews", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/previews", status_code=201, dependencies=app_scoped)
 def create_preview(app: str, body: PreviewRequest, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     try:
@@ -161,10 +166,15 @@ class Verdict(BaseModel):
     reason: str = ""
 
 
-@router.post("/previews/{preview_id}/{verdict}", dependencies=admin)
-def decide_preview(preview_id: int, verdict: str, body: Verdict, db: Session = Depends(get_db)):
+@router.post("/previews/{preview_id}/{verdict}", dependencies=signed_in)
+def decide_preview(preview_id: int, verdict: str, body: Verdict, request: Request, db: Session = Depends(get_db)):
     if verdict not in ("approve", "reject"):
         raise HTTPException(404, "unknown verdict")
+    pv = db.get(AppPreview, preview_id)
+    if not pv:
+        raise HTTPException(404, "preview not found")
+    check_app(request, db, pv.app)
+    body.actor = user(request) or body.actor
     try:
         res = _gh(fixer.approve if verdict == "approve" else fixer.reject, db, preview_id, body.actor,
                   *(() if verdict == "approve" else (body.reason,)))
@@ -181,7 +191,7 @@ def decide_preview(preview_id: int, verdict: str, body: Verdict, db: Session = D
 
 
 # ------------------------------------------------------- versions / backups
-@router.get("/apps/{app}/releases", dependencies=admin)
+@router.get("/apps/{app}/releases", dependencies=app_scoped)
 def list_releases(app: str, db: Session = Depends(get_db)):
     return [to_dict(r) for r in releases.list_releases(db, app)]
 
@@ -190,7 +200,7 @@ class ActorBody(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/releases/{release_id}/rollback", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/releases/{release_id}/rollback", status_code=201, dependencies=app_scoped)
 def rollback(app: str, release_id: int, body: ActorBody, db: Session = Depends(get_db)):
     try:
         dep = releases.rollback(db, app, release_id, body.actor)
@@ -203,7 +213,7 @@ def rollback(app: str, release_id: int, body: ActorBody, db: Session = Depends(g
     return dep_dict(dep)
 
 
-@router.post("/apps/{app}/backups", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/backups", status_code=201, dependencies=app_scoped)
 def backup_now(app: str, body: ActorBody, db: Session = Depends(get_db)):
     if not releases.live_deployment(db, app):
         raise HTTPException(400, "The app is not running.")
@@ -223,7 +233,7 @@ class SettingsRequest(BaseModel):
     actor: str = "operator"
 
 
-@router.put("/apps/{app}/settings", dependencies=admin)
+@router.put("/apps/{app}/settings", dependencies=app_scoped)
 def update_settings(app: str, body: SettingsRequest, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     before = releases.get_settings(db, app)
@@ -243,7 +253,7 @@ class ScheduleRequest(BaseModel):
     actor: str = "operator"
 
 
-@router.post("/apps/{app}/backup-schedules", status_code=201, dependencies=admin)
+@router.post("/apps/{app}/backup-schedules", status_code=201, dependencies=app_scoped)
 def add_schedule(app: str, body: ScheduleRequest, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     s = releases.add_schedule(db, app, body.every_hours, body.keep, body.actor)
@@ -251,7 +261,7 @@ def add_schedule(app: str, body: ScheduleRequest, db: Session = Depends(get_db))
     return s
 
 
-@router.delete("/apps/{app}/backup-schedules/{sched_id}", dependencies=admin)
+@router.delete("/apps/{app}/backup-schedules/{sched_id}", dependencies=app_scoped)
 def remove_schedule(app: str, sched_id: str, actor: str = "operator", db: Session = Depends(get_db)):
     if not releases.remove_schedule(db, app, sched_id, actor):
         raise HTTPException(404, "schedule not found")

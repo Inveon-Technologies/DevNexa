@@ -19,6 +19,7 @@ import System from "./pages/System";
 import Tests from "./pages/Tests";
 import Traffic from "./pages/Traffic";
 import Trash from "./pages/Trash";
+import UsersPage from "./pages/Users";
 
 export default function App() {
   return (
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="/policies" element={<Policies />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/system" element={<System />} />
+        <Route path="/users" element={<UsersPage />} />
         <Route path="*" element={<Overview />} />
       </Routes>
     </Layout>

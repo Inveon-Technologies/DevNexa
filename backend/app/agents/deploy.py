@@ -157,7 +157,11 @@ def upstream(container: str, port: int, host_port: int | None, target: dict | No
 def create_deployment(db, repo: str, branch: str, app: str | None = None, root_dir: str = "",
                       env: dict | None = None, options: dict | None = None, parent_id: int | None = None,
                       actor: str = "operator") -> AppDeployment:
-    dep = AppDeployment(app=slugify(app or repo.split("/")[-1]), repo=repo, branch=branch,
+    from ..services import owners
+
+    name = slugify(app or repo.split("/")[-1])
+    owners.claim(db, name, owners.owner_for_new_deployment(db, options, actor))  # raises NameTaken
+    dep = AppDeployment(app=name, repo=repo, branch=branch,
                         root_dir=root_dir.strip("/"), env=env or {}, options=options or {}, parent_id=parent_id,
                         triggered_by=actor)
     db.add(dep)

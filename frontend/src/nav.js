@@ -1,6 +1,6 @@
 import {
   Activity, BookOpenCheck, FlaskConical, FlaskRound, GitBranch, Gauge, Github, Layers, ListChecks, Radar, Rocket, ScrollText, Server, ShieldCheck,
-  Siren, Trash2, UserCheck,
+  Siren, Trash2, UserCheck, Users,
 } from "lucide-react";
 
 /**
@@ -32,3 +32,8 @@ export const NAV = {
     { to: "/system", label: "Architecture", icon: Layers },
   ],
 };
+
+/** Shown only to admins (when Sign in with GitHub is on). */
+export const ADMIN_NAV = [
+  { to: "/users", label: "Users", icon: Users, badge: "pending_users" },
+];

@@ -1,8 +1,9 @@
-import { Boxes, ChevronDown, Menu, X } from "lucide-react";
+import { Boxes, ChevronDown, Github, LogOut, Menu, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { api } from "../api";
 import { usePoll } from "../hooks";
-import { NAV } from "../nav";
+import { ADMIN_NAV, NAV } from "../nav";
 
 const MORE_KEY = "devnexa.nav.more";
 
@@ -39,8 +40,39 @@ function NavItem({ item, counts, onNavigate }) {
   );
 }
 
+/** Who is signed in, with their role and a sign-out button (or a sign-in link). */
+function Account({ me }) {
+  if (!me?.github_login) return null;
+  const signOut = async () => {
+    await api.post("/api/auth/logout");
+    window.location.assign("/deploy");
+  };
+  if (!me.signed_in) {
+    return (
+      <a href="/api/auth/github/login?next=/deploy"
+        className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-white/[0.06] px-3 py-2.5 text-xs text-slate-300 hover:bg-white/[0.04]">
+        <Github className="h-4 w-4" /> {me.account_status === "pending" ? `@${me.pending_login} · waiting for approval` : "Sign in with GitHub"}
+      </a>
+    );
+  }
+  return (
+    <div className="mx-3 mb-1 flex items-center gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+      {me.avatar_url ? <img src={me.avatar_url} alt="" className="h-7 w-7 rounded-full" /> : <Github className="h-5 w-5 text-slate-400" />}
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-medium text-slate-100">@{me.login}</p>
+        <p className="text-[11px] text-slate-500">{me.is_admin ? "Admin" : "Member"}</p>
+      </div>
+      <button onClick={signOut} title="Sign out" aria-label="Sign out" className="rounded-md p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-slate-200">
+        <LogOut className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
 function Sidebar({ onNavigate }) {
   const { data } = usePoll("/api/overview", 5000);
+  const { data: me } = usePoll("/api/auth/me", 30000);
+  const counts = { ...(data?.kpis || {}), pending_users: me?.pending_users };
   const loc = useLocation();
   const [moreOpen, setMoreOpen] = useState(() => readMoreOpen(loc.pathname));
   const toggleMore = () => {
@@ -67,7 +99,8 @@ function Sidebar({ onNavigate }) {
       </div>
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
         <ul className="space-y-0.5">
-          {NAV.main.map((it) => <NavItem key={it.to} item={it} counts={data?.kpis} onNavigate={onNavigate} />)}
+          {NAV.main.map((it) => <NavItem key={it.to} item={it} counts={counts} onNavigate={onNavigate} />)}
+          {me?.is_admin && me?.github_login && ADMIN_NAV.map((it) => <NavItem key={it.to} item={it} counts={counts} onNavigate={onNavigate} />)}
         </ul>
         <button
           onClick={toggleMore}
@@ -79,10 +112,11 @@ function Sidebar({ onNavigate }) {
         </button>
         {moreOpen && (
           <ul className="space-y-0.5">
-            {NAV.more.map((it) => <NavItem key={it.to} item={it} counts={data?.kpis} onNavigate={onNavigate} />)}
+            {NAV.more.map((it) => <NavItem key={it.to} item={it} counts={counts} onNavigate={onNavigate} />)}
           </ul>
         )}
       </nav>
+      <Account me={me} />
       <div className="m-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
         <span className="text-xs text-slate-400">{env?.mode === "live" ? "Live stack" : "Simulated"}</span>
         <span className={`flex items-center gap-1.5 text-xs font-medium ${env?.healthy ? "text-emerald-300" : "text-rose-300"}`}>

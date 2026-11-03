@@ -48,11 +48,22 @@ class Settings(BaseSettings):
     github_repo: str = ""
 
     # Sign in with GitHub (an OAuth app). The callback URL to register on GitHub is
-    # <public_url>/api/auth/github/callback. Only the GitHub logins in github_allowed_users may sign in;
-    # if that list is empty, the first account that signs in becomes the owner and nobody else can.
+    # <public_url>/api/auth/github/callback. Many people can sign in; each sees and deploys only their own repos,
+    # apps, servers and backups, and admins see everything.
     github_client_id: str = ""
     github_client_secret: str = ""
+    # Who may sign in: "approval" (anyone with GitHub; an admin approves them on the Users page before they can
+    # deploy), "open" (anyone with GitHub, straight away) or "invite" (only github_allowed_users and people an
+    # admin added on the Users page).
+    github_signup: str = "approval"
+    # Logins that are always let in (pre-approved), comma separated.
     github_allowed_users: str = ""
+    # Admin logins, comma separated. Empty: the server owner is the admin, which is the first login in
+    # github_allowed_users, or else the first account that ever signs in.
+    github_admins: str = ""
+    # How many apps a member may own (test URLs not counted). 0: no limit. Admins have no limit.
+    user_max_apps: int = 10
+    user_max_servers: int = 5
     public_url: str = ""
     session_secret: str = ""
     session_days: int = 14
