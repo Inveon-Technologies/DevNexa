@@ -68,8 +68,18 @@ def _node_major(pkg: dict) -> str:
 PNPM_ALLOW_BUILDS = "--config.dangerously-allow-all-builds=true"
 
 
-def _node_install(root: Path, use_npm_install: bool) -> tuple[str, str]:
-    """Returns (copy line for manifests, install command). `use_npm_install` also relaxes pnpm/yarn lockfiles."""
+def _node_install(root: Path, use_npm_install: bool, legacy_peer_deps: bool = False) -> tuple[str, str]:
+    """Returns (copy line for manifests, install command). `use_npm_install` also relaxes pnpm/yarn lockfiles;
+    `legacy_peer_deps` lets npm install a tree whose peer dependency ranges conflict (ERESOLVE)."""
+    copy, install = _node_install_cmd(root, use_npm_install)
+    if (root / ".npmrc").exists():  # registry, auth and legacy-peer-deps settings must apply to the install
+        copy = copy.replace(" ./", " .npmrc ./")
+    if legacy_peer_deps and install.startswith("npm "):
+        install += " --legacy-peer-deps"
+    return copy, install
+
+
+def _node_install_cmd(root: Path, use_npm_install: bool) -> tuple[str, str]:
     if (root / "pnpm-lock.yaml").exists():
         frozen = "--no-frozen-lockfile" if use_npm_install else "--frozen-lockfile"
         return ("COPY package.json pnpm-lock.yaml ./",
@@ -90,21 +100,33 @@ def _script(install: str, script: str) -> list[str]:
     return ["npm", "run", script]
 
 
+def _vite_out_dir(root: Path) -> str | None:
+    for name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"):
+        m = re.search(r"""outDir\s*:\s*['"]\.?/?([\w./-]+?)/?['"]""", _read(root / name))
+        if m and ".." not in m.group(1):
+            return m.group(1)
+    return None
+
+
 def node_plan(root: Path, options: dict) -> BuildPlan:
     pkg = json.loads(_read(root / "package.json") or "{}")
     deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
     scripts = pkg.get("scripts", {})
     node = str(options.get("runtime_version") or _node_major(pkg))
-    copy, install = _node_install(root, options.get("npm_install", False))
+    copy, install = _node_install(root, options.get("npm_install", False), options.get("legacy_peer_deps", False))
+    tools = "RUN apk add --no-cache python3 make g++\n" if options.get("build_tools") else ""
     build_line = f"RUN {' '.join(_script(install, 'build'))}" if "build" in scripts else ""
+    if options.get("skip_typecheck") and "vite" in deps and re.search(r"\btsc\b", scripts.get("build", "")):
+        # `tsc -b && vite build`: type errors block the bundle even though Vite would build it fine
+        build_line = "RUN npx vite build"
     start = scripts.get("start", "")
     spa = ("vite" in deps or "react-scripts" in deps) and (not start or re.search(r"\b(vite|react-scripts)\b", start))
     if spa and "build" in scripts:
-        out = "build" if "react-scripts" in deps else "dist"
+        out = options.get("spa_out") or _vite_out_dir(root) or ("build" if "react-scripts" in deps else "dist")
         fw = "Create React App" if "react-scripts" in deps else "Vite"
         return BuildPlan("node-static", 80, GENERATED, f"""FROM node:{node}-alpine AS build
 WORKDIR /app
-{copy}
+{tools}{copy}
 RUN {install}
 COPY . .
 {build_line}
@@ -124,7 +146,7 @@ EXPOSE 80
     kind = "node-next" if "next" in deps else "node"
     return BuildPlan(kind, port, GENERATED, f"""FROM node:{node}-alpine
 WORKDIR /app
-{copy}
+{tools}{copy}
 RUN {install}
 COPY . .
 {build_line}
