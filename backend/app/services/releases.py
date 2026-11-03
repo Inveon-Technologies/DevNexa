@@ -20,7 +20,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import AppDeployment, AppRelease, KeyValue
+from ..models import AppDeployment, AppRelease, KeyValue, Server
+from . import servers
 from .audit import audit
 
 log = logging.getLogger("devnexa.releases")
@@ -34,6 +35,9 @@ STEPS = [
                               ".NET, static, or the repo's Dockerfile)", "optional": False},
     {"key": "version", "title": "Tag the image as the next version (v1, v2, ...)", "optional": False},
     {"key": "auto_backup", "title": "Keep earlier versions as backups", "optional": True},
+    {"key": "persistent_data", "title": "Keep app files in a persistent /data volume (survives redeploys)", "optional": True},
+    {"key": "smart_backup", "title": "Smart backups of /data and the database: on a schedule and before each new version",
+     "optional": True},
     {"key": "health", "title": "Start and health-check", "optional": False},
     {"key": "zero_downtime", "title": "Zero-downtime switch: the current version serves until the new one passes "
                                       "its checks, then drains", "optional": False},
@@ -43,11 +47,18 @@ STEPS = [
 ]
 
 DEFAULTS = {
-    "steps": {"auto_deploy": True, "auto_backup": True, "load_balancer": False, "issue_capture": True, "auto_fix": True},
+    "steps": {"auto_deploy": True, "auto_backup": True, "persistent_data": True, "smart_backup": True,
+              "load_balancer": False, "issue_capture": True, "auto_fix": True},
     "keep_versions": 5,
     "replicas": 2,
     "backup_schedules": [],
+    # Smart data backups (services/backups.py). Retention keeps the newest `keep_last` plus one per day, week and
+    # month; what it prunes goes to the trash first.
+    "backup_policy": {"every_hours": 24, "keep_last": 7, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 3,
+                      "skip_unchanged": True, "before_changes": True},
 }
+POLICY_LIMITS = {"every_hours": (1, 720), "keep_last": (1, 50), "keep_daily": (0, 60), "keep_weekly": (0, 52),
+                 "keep_monthly": (0, 24)}
 
 
 def now() -> datetime:
@@ -71,6 +82,7 @@ def get_settings(db: Session, app: str) -> dict:
     out = {**DEFAULTS, **saved}
     out["steps"] = {**DEFAULTS["steps"], **(saved.get("steps") or {})}
     out["backup_schedules"] = list(saved.get("backup_schedules") or [])
+    out["backup_policy"] = {**DEFAULTS["backup_policy"], **(saved.get("backup_policy") or {})}
     return out
 
 
@@ -85,9 +97,20 @@ def save_settings(db: Session, app: str, value: dict) -> dict:
 
 
 def update_settings(db: Session, app: str, steps: dict | None = None, keep_versions: int | None = None,
-                    replicas: int | None = None, actor: str = "operator") -> dict:
+                    replicas: int | None = None, actor: str = "operator", backup_policy: dict | None = None) -> dict:
     cur = get_settings(db, app)
     changes = []
+    for k, v in (backup_policy or {}).items():
+        if k in POLICY_LIMITS:
+            lo, hi = POLICY_LIMITS[k]
+            v = max(lo, min(hi, float(v) if k == "every_hours" else int(v)))
+        elif k in ("skip_unchanged", "before_changes"):
+            v = bool(v)
+        else:
+            continue
+        if cur["backup_policy"].get(k) != v:
+            cur["backup_policy"][k] = v
+            changes.append(f"backup {k.replace('_', ' ')} {v}")
     for k, v in (steps or {}).items():
         if k in DEFAULTS["steps"] and cur["steps"].get(k) != bool(v):
             cur["steps"][k] = bool(v)
@@ -156,7 +179,7 @@ def on_live(dep_id: int, env: dict, options: dict) -> None:
         live_image = rel.image if rel else dep.image
         removals = _retention(db, app, settings, live_image)
         lb = settings["steps"]["load_balancer"]
-        primary = f"{dep.container}:{dep.port}"
+        primary = _primary(db, dep)
         old_replicas = _get_lb(db, app).get("replicas", [])
         _set_upstreams(db, app, [primary], [])
     ex = _executor()
@@ -164,7 +187,7 @@ def on_live(dep_id: int, env: dict, options: dict) -> None:
         ex.run(["docker", "rmi", img])
     from ..agents import deploy
 
-    deploy.retire(old_replicas)  # they no longer get traffic; let in-flight requests finish first
+    deploy.retire(old_replicas)  # replicas only ever run on the DevNexa host; let in-flight requests finish
     if lb:
         start_replicas(dep_id, env, options)
 
@@ -255,9 +278,20 @@ def _set_upstreams(db: Session, app: str, upstreams: list[str], replicas: list[s
     db.flush()
 
 
+def _primary(db: Session, dep: AppDeployment) -> str:
+    """Where the DevNexa host's proxy reaches a deployment: its container locally, host:port on a remote server."""
+    sid = (dep.options or {}).get("server_id")
+    server = db.get(Server, sid) if sid else None
+    if server and dep.host_port:
+        return f"{servers.address(server)}:{dep.host_port}"
+    return f"{dep.container}:{dep.port}"
+
+
 def pick_upstream(db: Session, live: AppDeployment) -> str:
     """Round-robin across the live deployment's healthy containers (the primary when the balancer is off)."""
-    primary = f"{live.container}:{live.port}"
+    primary = _primary(db, live)
+    if (live.options or {}).get("server_id"):
+        return primary
     ups = _get_lb(db, live.app).get("upstreams") or []
     ups = [u for u in ups if u.split(":")[0].startswith(live.container or "\0")] or [primary]
     return ups[next(_rr) % len(ups)]
@@ -273,12 +307,18 @@ def start_replicas(dep_id: int, env: dict, options: dict) -> list[str]:
     from ..agents import deploy
     from ..config import get_settings as cfg
     from ..db import session_scope
+    from . import backups
 
     s = cfg()
     with session_scope() as db:
         dep = db.get(AppDeployment, dep_id)
         n = get_settings(db, dep.app)["replicas"]
         app, image, port, container = dep.app, dep.image, dep.port, dep.container
+        if (dep.options or {}).get("server_id"):
+            audit(db, "deploy-agent", "app.load_balancer", "app_deployment", dep_id,
+                  f"{app} runs on a remote server: load-balancer replicas run only on the DevNexa host, so it "
+                  "serves from one container")
+            return []
     ex = _executor()
     healthy, started = [f"{container}:{port}"], []
     for i in range(2, n + 1):
@@ -288,7 +328,9 @@ def start_replicas(dep_id: int, env: dict, options: dict) -> list[str]:
                "--label", "devnexa.logs=true", "--label", f"devnexa.app={app}", "--label", f"devnexa.deployment={dep_id}",
                "--label", "devnexa.replica=true", "--memory", options.get("memory", s.apps_memory), "--cpus", s.apps_cpus,
                "-e", f"PORT={port}", "-e", "HOST=0.0.0.0"]
-        for k, v in env.items():
+        extra_args, extra_env = backups.runtime(app)
+        cmd += extra_args
+        for k, v in {**extra_env, **env}.items():
             cmd += ["-e", f"{k}={v}"]
         code, _ = ex.run(cmd + [image])
         if code != 0:
@@ -309,8 +351,9 @@ def start_replicas(dep_id: int, env: dict, options: dict) -> list[str]:
 
 def stop_replicas(db: Session, app: str) -> None:
     lb = _get_lb(db, app)
-    for c in lb.get("replicas", []):
-        _executor().run(["docker", "rm", "-f", c])
+    with servers.use(None):
+        for c in lb.get("replicas", []):
+            _executor().run(["docker", "rm", "-f", c])
     _set_upstreams(db, app, [], [])
 
 
@@ -325,7 +368,7 @@ def check_replicas(app: str) -> None:
         if not live or not lb.get("replicas"):
             return
         port, replicas = live.port, lb["replicas"]
-        primary = f"{live.container}:{live.port}"
+        primary = _primary(db, live)
     healthy = [primary]
     for c in replicas:
         st = deploy.inspect(c) or {}
@@ -348,7 +391,7 @@ def apply_lb(app: str) -> None:
         if not live:
             return
         dep_id, env, options = live.id, dict(live.env or {}), dict(live.options or {})
-        _set_upstreams(db, app, [f"{live.container}:{live.port}"], [])
+        _set_upstreams(db, app, [_primary(db, live)], [])
     for c in replicas:
         _executor().run(["docker", "rm", "-f", c])
     if on:
@@ -378,7 +421,11 @@ def snapshot(app: str, sched_id: str | None = None, actor: str = "backup-schedul
         sha, msg = live.commit_sha, live.commit_message
     stamp = now().strftime("%Y%m%d-%H%M%S")
     tag = f"devnexa-app/{app}:backup-{stamp}"
-    code, out = _executor().run(["docker", "commit", "--pause=false", container, tag])
+    try:
+        with servers.use_app(app):  # the snapshot is taken (and kept) on the server the app runs on
+            code, out = _executor().run(["docker", "commit", "--pause=false", container, tag])
+    except servers.ServerError as e:
+        code, out = 1, str(e)
     if code != 0:
         log.warning("backup of %s failed: %s", app, out[-200:])
         return None
@@ -404,8 +451,12 @@ def snapshot(app: str, sched_id: str | None = None, actor: str = "backup-schedul
             drop.append(r.image)
         audit(db, actor, "app.backup", "app_release", rel.id, f"{app}: snapshot {tag}")
         rel_id = rel.id
-    for img in drop:
-        _executor().run(["docker", "rmi", img])
+    try:
+        with servers.use_app(app):
+            for img in drop:
+                _executor().run(["docker", "rmi", img])
+    except servers.ServerError:
+        pass
     with session_scope() as db:
         return db.get(AppRelease, rel_id)
 

@@ -447,3 +447,81 @@ class AppPreview(Base):
     decided_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+# ------------------------------------------------------- data backups and trash
+class AppBackup(Base):
+    """A backup of an app's data: its persistent /data volume and its database dump, plus which code version was
+    live. Files live in <backups_dir>/<app>/<id>/. Deleting one moves it to the trash first."""
+
+    __tablename__ = "app_backups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="manual")   # scheduled|manual|pre-deploy|pre-restore|final|imported
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|ready|failed|trashed|purged
+    label: Mapped[str] = mapped_column(String(120), default="")
+    parts: Mapped[list] = mapped_column(JSON, default=list)            # [{type, file, bytes, engine?, source}]
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)  # content hash, for skip-unchanged
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)       # never removed by retention
+    release_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    release_image: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    trashed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    trashed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    trash_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)  # purge time while in the trash
+
+
+class AppDatabase(Base):
+    """A database DevNexa runs for an app (its own container and volume). Deleting it moves it to the trash:
+    the container stops but the volume is kept until the trash is emptied or the item expires."""
+
+    __tablename__ = "app_databases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app: Mapped[str] = mapped_column(String(60), index=True)
+    engine: Mapped[str] = mapped_column(String(20))                    # postgres | mysql | mongo
+    container: Mapped[str] = mapped_column(String(120))
+    volume: Mapped[str] = mapped_column(String(120))
+    db_name: Mapped[str] = mapped_column(String(60))
+    username: Mapped[str] = mapped_column(String(60))
+    password: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|failed|trashed|purged
+    created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    trashed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    trashed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+# ------------------------------------------------------------ remote servers
+class Server(Base):
+    """Another machine DevNexa can deploy apps to and manage over SSH (its Docker engine is driven through
+    `DOCKER_HOST=ssh://...`). The DevNexa host itself is the implicit local server and has no row."""
+
+    __tablename__ = "servers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(60), unique=True)
+    host: Mapped[str] = mapped_column(String(255))
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(64), default="root")
+    private_key: Mapped[str] = mapped_column(Text)
+    public_key: Mapped[str] = mapped_column(Text)
+    known_hosts: Mapped[str] = mapped_column(Text, default="")
+    # Where app traffic reaches this server (IP or hostname). Defaults to `host`.
+    address: Mapped[str] = mapped_column(String(255), default="")
+    port_base: Mapped[int] = mapped_column(Integer, default=20000)
+    status: Mapped[str] = mapped_column(String(20), default="new")  # new|online|no_docker|offline
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    checked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

@@ -8,6 +8,7 @@ import { api, operatorName } from "../api";
 import { Badge, Card, Empty, ErrorBox, Loading, PageHeader, StatusBadge, Tabs, Toast, Toggle } from "../components/ui";
 import { ago, time } from "../format";
 import { usePoll, useToast } from "../hooks";
+import DataBackups from "./DataBackups";
 
 const SEV_TONE = { error: "red", warning: "amber" };
 const ISSUE_TONE = { open: "amber", fixing: "blue", in_preview: "violet", resolved: "green", ignored: "slate" };
@@ -261,7 +262,7 @@ function Versions({ app, ov, reloadOv, show }) {
           </ul>
         )}
       </Card>
-      <Card title="Backup schedules" icon={Archive} subtitle="Snapshots of the running container (its files and data), on a timer.">
+      <Card title="Container snapshots" icon={Archive} subtitle="Image snapshots of the running container on a timer. For files and databases use Data & backups.">
         <ul className="space-y-2">
           {schedules.map((s) => (
             <li key={s.id} className="flex items-center gap-2 rounded-xl bg-white/[0.03] px-3 py-2 text-sm">
@@ -349,13 +350,15 @@ export default function LiveApp() {
         <Tabs value={tab} onChange={setTab} tabs={[
           { value: "issues", label: "Issues", count: ov.issues.open },
           { value: "previews", label: "Test URLs" },
-          { value: "versions", label: "Versions & backups" },
+          { value: "versions", label: "Versions" },
+          { value: "data", label: "Data & backups" },
           { value: "pipeline", label: "Pipeline settings" },
         ]} />
       </div>
       {tab === "issues" && <Issues app={app} ov={ov} show={show} />}
       {tab === "previews" && <Previews app={app} show={show} />}
       {tab === "versions" && <Versions app={app} ov={ov} reloadOv={reload} show={show} />}
+      {tab === "data" && <DataBackups app={app} show={show} />}
       {tab === "pipeline" && <Pipeline app={app} ov={ov} reloadOv={reload} show={show} />}
       <Toast toast={toast} />
     </>

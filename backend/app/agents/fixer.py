@@ -291,7 +291,13 @@ def _remove_preview_deployments(db: Session, pv: AppPreview) -> None:
                                                     AppDeployment.status.in_(("running", "queued", "cloning",
                                                                               "building", "starting")))):
         if d.container:
-            deploy.executor.run(["docker", "rm", "-f", d.container])
+            from ..services import servers
+
+            try:
+                with servers.use_for(d):
+                    deploy.executor.run(["docker", "rm", "-f", d.container])
+            except servers.ServerError:
+                pass
         d.status, d.health = "stopped", "stopped"
 
 

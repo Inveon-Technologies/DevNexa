@@ -6,6 +6,7 @@ os.environ.setdefault("DEVNEXA_DATABASE_URL", f"sqlite:///{_db}")
 os.environ.setdefault("DEVNEXA_SIM_STEP_DELAY", "0")
 os.environ.setdefault("DEVNEXA_SEED_DEMO_DATA", "false")
 os.environ.setdefault("DEVNEXA_TRAFFIC_SOURCE", "off")
+os.environ.setdefault("DEVNEXA_BACKUPS_DIR", os.path.join(tempfile.mkdtemp(), "backups"))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

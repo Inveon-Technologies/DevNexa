@@ -219,6 +219,7 @@ class SettingsRequest(BaseModel):
     steps: dict[str, bool] | None = None
     keep_versions: int | None = Field(default=None, ge=1, le=20)
     replicas: int | None = Field(default=None, ge=2, le=4)
+    backup_policy: dict | None = None
     actor: str = "operator"
 
 
@@ -226,7 +227,8 @@ class SettingsRequest(BaseModel):
 def update_settings(app: str, body: SettingsRequest, db: Session = Depends(get_db)):
     _app_or_404(db, app)
     before = releases.get_settings(db, app)
-    out = releases.update_settings(db, app, body.steps, body.keep_versions, body.replicas, body.actor)
+    out = releases.update_settings(db, app, body.steps, body.keep_versions, body.replicas, body.actor,
+                                   body.backup_policy)
     db.commit()
     lb_changed = before["steps"]["load_balancer"] != out["steps"]["load_balancer"] or \
         (out["steps"]["load_balancer"] and before["replicas"] != out["replicas"])
