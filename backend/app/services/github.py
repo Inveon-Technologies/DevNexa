@@ -262,7 +262,7 @@ def find_or_open_pr(token: str, full_name: str, head: str, base: str, title: str
         return {"number": pr["number"], "url": pr["html_url"]}
     pr = _call(token, "POST", f"/repos/{full_name}/pulls", json={"title": title, "head": head, "base": base, "body": body})
     if pr.status_code != 201:
-        raise GitHubError(f"Could not open the pull request: GitHub {pr.status_code} {pr.text[:200]}")
+        raise GitHubError(f"Could not open the pull request: GitHub {pr.status_code} {pr.text[:200]}", pr.status_code)
     return {"number": pr.json()["number"], "url": pr.json()["html_url"]}
 
 

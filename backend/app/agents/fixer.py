@@ -260,8 +260,23 @@ def preview_branch(db: Session, app: str, branch: str, actor: str) -> int:
         raise ValueError(f"{branch} is the app's own branch; pick another branch to test.")
     token = _token(db, app)
     repo, base_branch = base.repo, base.branch
-    pr = github.find_or_open_pr(token, repo, branch, base_branch, f"{branch} (DevNexa test URL)",
-                                f"Opened by DevNexa to test `{branch}` at its own URL before merging into `{base_branch}`.")
+    try:
+        github.branch_sha(token, repo, branch)
+    except github.GitHubError as e:
+        if e.status == 404:
+            raise ValueError(f"There is no branch called {branch} in {repo}. Push it to GitHub first, "
+                             "or check the spelling (branch names are case-sensitive).") from e
+        raise
+    try:
+        pr = github.find_or_open_pr(token, repo, branch, base_branch, f"{branch} (DevNexa test URL)",
+                                    f"Opened by DevNexa to test `{branch}` at its own URL before merging into "
+                                    f"`{base_branch}`.")
+    except github.GitHubError as e:
+        if e.status != 422:
+            raise
+        # GitHub will not open a PR when the branch has nothing new ("No commits between ..."): still give it a
+        # test URL, there is just nothing to merge yet.
+        pr = None
     return _create_preview(app, repo, base_branch, branch, pr, f"Test {branch}", actor)
 
 
