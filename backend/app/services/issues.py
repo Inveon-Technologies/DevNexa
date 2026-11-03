@@ -228,7 +228,13 @@ AGENT_JS = r"""(function () {
   // Report mode: open the site with ?devnexa-report=1 (or press Alt+Shift+R). A small DevNexa bar stays on every page
   // of the tab (sessionStorage), and the site works normally: log in, open other pages, fill forms. Press
   // "Point at a problem" only when you are on the broken part; after one report it goes back to browsing.
-  var bar = null, box = null, picking = false;
+  var bar = null, box = null, picking = false, token = null;
+  // A link from DevNexa carries a signed token (?devnexa-report=<token>): reports then go to the AI Fix Agent at once.
+  var param = (location.search.match(/[?&]devnexa-report=([^&#]+)/) || [])[1];
+  try {
+    if (param && param !== "1") sessionStorage.setItem("devnexa-report-token", decodeURIComponent(param));
+    token = sessionStorage.getItem("devnexa-report-token");
+  } catch (e) { if (param && param !== "1") token = decodeURIComponent(param); }
   var BTN = "margin-left:8px;background:#334155;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer;font:13px system-ui";
   function css(el, t) { el.style.cssText = t; return el; }
   function show() {
@@ -247,7 +253,9 @@ AGENT_JS = r"""(function () {
     if (!bar) return;
     bar.innerHTML = "";
     var label = document.createElement("span");
-    label.textContent = note || (picking ? "Click the section that has a problem" : "DevNexa reporter: use the site normally");
+    label.textContent = note || (picking ? (token ? "Click the section to fix or change" : "Click the section that has a problem")
+                                         : (token ? "DevNexa AI: browse normally, then point at what to fix or change"
+                                                  : "DevNexa reporter: use the site normally"));
     bar.appendChild(label);
     function btn(text, fn, primary) {
       var b = css(document.createElement("button"), BTN + (primary ? ";background:#f43f5e" : ""));
@@ -256,7 +264,7 @@ AGENT_JS = r"""(function () {
       bar.appendChild(b);
     }
     if (picking) btn("Cancel", function () { setPicking(false); });
-    else { btn("Point at a problem", function () { setPicking(true); }, true); btn("Exit", hide); }
+    else { btn(token ? "Point at it" : "Point at a problem", function () { setPicking(true); }, true); btn("Exit", hide); }
   }
   function setPicking(on) {
     picking = on;
@@ -267,7 +275,7 @@ AGENT_JS = r"""(function () {
   }
   function hide() {
     setPicking(false);
-    try { sessionStorage.removeItem("devnexa-report"); } catch (e) {}
+    try { sessionStorage.removeItem("devnexa-report"); sessionStorage.removeItem("devnexa-report-token"); } catch (e) {}
     bar && bar.remove(); box && box.remove(); bar = box = null;
   }
   function hover(e) {
@@ -281,18 +289,19 @@ AGENT_JS = r"""(function () {
     e.preventDefault(); e.stopPropagation();
     var el = e.target;
     setPicking(false);  // back to normal browsing whatever the answer
-    var what = window.prompt("What is wrong with this section?");
+    var what = window.prompt(token ? "What should the AI fix or change here? (e.g. \"the Submit button does nothing\" or " +
+                                     "\"make this heading blue and say Contact us\")" : "What is wrong with this section?");
     if (what === null) return;
     seen = {}; send("user_report", { message: what || "Something is wrong here", selector: cssPath(el), section: sectionOf(el),
-      html: (el.outerHTML || "").slice(0, 3000), text: (el.innerText || "").slice(0, 1000) });
-    render("Thanks, sent to DevNexa.");
-    setTimeout(function () { render(); }, 3000);
+      html: (el.outerHTML || "").slice(0, 3000), text: (el.innerText || "").slice(0, 1000), token: token || undefined });
+    render(token ? "Sent. The AI is working on it; its test URL appears in DevNexa under Test URLs." : "Thanks, sent to DevNexa.");
+    setTimeout(function () { render(); }, token ? 6000 : 3000);
   }
   document.addEventListener("keydown", function (e) {
     if (e.altKey && e.shiftKey && (e.key === "R" || e.key === "r")) { show(); setPicking(!picking); }
     if (e.key === "Escape" && picking) setPicking(false);
   });
-  var wants = /[?&]devnexa-report=1/.test(location.search); try { wants = wants || sessionStorage.getItem("devnexa-report") === "1"; } catch (e) {}
+  var wants = !!param; try { wants = wants || sessionStorage.getItem("devnexa-report") === "1"; } catch (e) {}
   if (wants) { if (document.body) show(); else document.addEventListener("DOMContentLoaded", show); }
 })();
 """

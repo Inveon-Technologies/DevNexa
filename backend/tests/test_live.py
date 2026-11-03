@@ -266,3 +266,32 @@ def test_live_apps_overview(client, fake):
     ov = client.get("/api/live/apps/ov-app").json()
     assert {s["key"] for s in ov["steps"]} >= {"auto_backup", "load_balancer", "issue_capture", "auto_fix"}
     assert deploy.executor  # fixture swapped it
+
+
+def test_pointed_change_from_a_signed_link_goes_to_the_ai_at_once(client, fake, monkeypatch):
+    fake(files=FILES)
+    started = []
+    monkeypatch.setattr(fixer, "start_fix", lambda iid, actor, hint=None: started.append((iid, actor, hint)))
+    deploy_app(client, "point-app")
+    link = client.post("/api/live/apps/point-app/report-link").json()["url"]
+    assert link.startswith("https://point-app.devnexa.space/?devnexa-report=")
+    token = link.split("devnexa-report=")[1]
+    host = {"host": "point-app.devnexa.space"}
+    change = {"kind": "user_report", "message": "Make this heading say Contact us", "page": "/", "selector": "h1",
+              "text": "Get in touch"}
+    issues._hits.clear()
+    client.post("/__devnexa/report", content=json.dumps(change), headers=host)  # a visitor: recorded only
+    assert started == []
+    issues._hits.clear()
+    client.post("/__devnexa/report", content=json.dumps(change | {"token": token}), headers=host)
+    assert len(started) == 1 and started[0][2] == "Make this heading say Contact us"
+    issues._hits.clear()  # a token for another app does nothing
+    other = client.post("/__devnexa/report", content=json.dumps(change | {"message": "x", "token": token}),
+                        headers={"host": "auto-app.devnexa.space"})
+    assert other.status_code == 204 and len(started) == 1
+
+
+def test_agent_tokens_use_the_pointed_section_text():
+    toks = fixer._tokens({"kind": "user_report", "message": "make it blue", "page": "/",
+                          "sample": {"text": "Contact Vaibhav today", "html": '<h2 id="contact-title">x</h2>'}})
+    assert "contact" in toks and "contact-title" in toks

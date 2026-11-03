@@ -137,19 +137,26 @@ function Issues({ app, ov, show }) {
     try { const r = await api.post(`/api/live/apps/${app}/scan`); show(`Scanned ${r.pages} pages`, "success"); reload(); } catch (e) { show(e.message, "error"); } finally { setScanning(false); }
   };
   const liveUrl = ov.live?.url;
+  const pointAt = async () => {
+    const w = window.open("about:blank", "_blank"); // opened now, so the popup blocker allows it
+    try {
+      const r = await api.post(`/api/live/apps/${app}/report-link`, {});
+      if (w) w.location = r.url; else window.location = r.url;
+    } catch (e) { if (w) w.close(); show(e.message, "error"); }
+  };
   return (
     <div className="space-y-4">
       <Card bodyClass="p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <Tabs value={filter} onChange={setFilter} tabs={[{ value: "active", label: "Needs attention" }, { value: "resolved", label: "Fixed" }, { value: "ignored", label: "Ignored" }, { value: "all", label: "All" }]} />
           <div className="flex flex-wrap gap-2">
-            {liveUrl && <a className="btn-ghost py-1.5 text-xs" href={`${liveUrl}/?devnexa-report=1`} target="_blank" rel="noreferrer"><MousePointerClick className="h-3.5 w-3.5" /> Point at a problem</a>}
+            {liveUrl && <button type="button" className="btn-ghost py-1.5 text-xs" onClick={pointAt}><MousePointerClick className="h-3.5 w-3.5" /> Point at a problem or change</button>}
             <button className="btn-ghost py-1.5 text-xs" onClick={scan} disabled={scanning || !ov.live}><Radar className="h-3.5 w-3.5" /> {scanning ? "Scanning…" : "Scan pages"}</button>
           </div>
         </div>
         <p className="mt-3 text-xs text-slate-500">
           Issues come from visitors' browsers (errors, failed API calls, blank pages and empty sections), the app's server logs and page scans.
-          {" "}<b className="text-slate-400">Point at a problem</b> opens your site with a small DevNexa bar. Use the site normally (log in, open other pages); the bar stays on every page. Press its <i>Point at a problem</i> button only when you reach the broken part, click it and describe it.
+          {" "}<b className="text-slate-400">Point at a problem or change</b> opens your site with a small DevNexa bar. Use the site normally (log in, open other pages); the bar stays on every page. When you reach the part you want, press <i>Point at it</i>, click it and describe the problem or the change. The AI Fix Agent then edits the code on a new branch and deploys it to a test URL here; approving merges it.
           {!ov.settings.steps.issue_capture && " Browser capture is off in Pipeline settings."}
         </p>
       </Card>

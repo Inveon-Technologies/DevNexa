@@ -64,6 +64,10 @@ def _tokens(issue: dict) -> list[str]:
     # bundled file names: /assets/Checkout-3f2a9c.js -> Checkout
     words += [re.sub(r"[-.][0-9a-f]{6,}$", "", m) for m in
               re.findall(r"/([A-Za-z][\w-]+?)(?:\.[0-9a-f]{6,})?\.(?:js|jsx|ts|tsx|py|vue)", issue.get("stack") or "")]
+    sample = issue.get("sample") or {}
+    if issue.get("kind") == "user_report":  # words shown in the pointed-at section find the component rendering it
+        words += [w for w in re.findall(r"[A-Za-z][A-Za-z'-]{4,}", sample.get("text") or "")][:12]
+        words += re.findall(r'id="([\w-]+)"', sample.get("html") or "")[:6]
     stop = {"error", "failed", "returned", "undefined", "cannot", "read", "properties", "null", "with", "from",
             "this", "that", "function", "object", "uncaught", "typeerror", "referenceerror", "assets", "index",
             "main", "http", "https", "section", "page", "type", "promise", "unhandled", "rejection", "script"}
@@ -101,8 +105,11 @@ def related_files(root: Path, issue: dict, limit: int = 6, max_bytes: int = 3000
 
 
 LLM_SYSTEM = """You are the Fix Agent of DevNexa, a DevOps platform. A deployed web app has a live issue,
-captured from visitors' browsers, the server logs, a page scan, or a person who pointed at a broken section.
-Find the cause in the given files and fix it with the smallest safe change.
+captured from visitors' browsers, the server logs, a page scan, or a person who pointed at a section of the page.
+When a person pointed at a section (kind user_report), their message is either a problem or a CHANGE they want
+(new text, colours, layout, a new button or field, ...): make exactly that change. sample.html / sample.text show the
+section as rendered; find the component that renders it in the given files.
+Otherwise find the cause in the given files and fix it with the smallest safe change.
 Reply with one JSON object and nothing else, with keys: title (short, imperative, e.g. "Handle empty cart on
 checkout"), root_cause (1-2 sentences), suggestion (what the change does), confidence (0..1),
 patch (list of {path, content} with the FULL new content of each changed file; at most 3 files; [] if you
