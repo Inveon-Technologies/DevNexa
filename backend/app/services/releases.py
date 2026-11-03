@@ -28,22 +28,27 @@ log = logging.getLogger("devnexa.releases")
 
 # The deploy pipeline, in order. `optional` steps can be switched off per app from the dashboard.
 STEPS = [
+    {"key": "auto_deploy", "title": "Auto-deploy every new commit on the branch (merged pull requests and pushes)",
+     "optional": True},
     {"key": "clone", "title": "Clone the repo", "optional": False},
-    {"key": "build", "title": "Build a Docker image", "optional": False},
+    {"key": "build", "title": "Detect the language and build a Docker image (Node, Python, Java, Go, Rust, Ruby, PHP, "
+                              ".NET, static, or the repo's Dockerfile)", "optional": False},
     {"key": "version", "title": "Tag the image as the next version (v1, v2, ...)", "optional": False},
     {"key": "auto_backup", "title": "Keep earlier versions as backups", "optional": True},
     {"key": "persistent_data", "title": "Keep app files in a persistent /data volume (survives redeploys)", "optional": True},
     {"key": "smart_backup", "title": "Smart backups of /data and the database: on a schedule and before each new version",
      "optional": True},
     {"key": "health", "title": "Start and health-check", "optional": False},
+    {"key": "zero_downtime", "title": "Zero-downtime switch: the current version serves until the new one passes "
+                                      "its checks, then drains", "optional": False},
     {"key": "load_balancer", "title": "Load balancer: run replicas and spread traffic", "optional": True},
     {"key": "issue_capture", "title": "Capture live issues from visitors' browsers", "optional": True},
     {"key": "auto_fix", "title": "Auto-fix: open a fix branch and a test URL for repeated issues", "optional": True},
 ]
 
 DEFAULTS = {
-    "steps": {"auto_backup": True, "persistent_data": True, "smart_backup": True, "load_balancer": False,
-              "issue_capture": True, "auto_fix": True},
+    "steps": {"auto_deploy": True, "auto_backup": True, "persistent_data": True, "smart_backup": True,
+              "load_balancer": False, "issue_capture": True, "auto_fix": True},
     "keep_versions": 5,
     "replicas": 2,
     "backup_schedules": [],
@@ -180,9 +185,9 @@ def on_live(dep_id: int, env: dict, options: dict) -> None:
     ex = _executor()
     for img in removals:
         ex.run(["docker", "rmi", img])
-    with servers.use(None):  # replicas only ever run on the DevNexa host
-        for c in old_replicas:
-            ex.run(["docker", "rm", "-f", c])
+    from ..agents import deploy
+
+    deploy.retire(old_replicas)  # replicas only ever run on the DevNexa host; let in-flight requests finish
     if lb:
         start_replicas(dep_id, env, options)
 

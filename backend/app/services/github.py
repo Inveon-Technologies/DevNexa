@@ -1,9 +1,11 @@
 """GitHub account connection (Sign in with GitHub, or a pasted personal access token), repo/branch listing,
-and pushing fix branches / opening pull requests on the user's repo. Nothing is ever pushed to the base branch."""
+and pushing fix branches / opening pull requests on the user's repo. Nothing is ever pushed to the base branch
+(merges go through pull requests, which a person approves in DevNexa or on GitHub)."""
 
 from __future__ import annotations
 
 import base64
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -250,6 +252,27 @@ def merge_pr(token: str, full_name: str, number: int, title: str, method: str = 
         msg = (r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("message")
         raise GitHubError(f"GitHub could not merge PR #{number}: {msg or r.status_code}", 409 if r.status_code in (405, 409) else r.status_code)
     return r.json().get("sha", "")
+
+
+def pr_state(token: str, full_name: str, number: int, wait: float = 6.0) -> dict:
+    """{state, merged, mergeable (True/False/None), mergeable_state, head, base, head_sha, url}. GitHub works out
+    mergeability in the background after a push, so `mergeable` can be None for a few seconds; wait for it."""
+    deadline = time.monotonic() + wait
+    while True:
+        r = _call(token, "GET", f"/repos/{full_name}/pulls/{number}")
+        if r.status_code != 200:
+            raise GitHubError(f"Could not read PR #{number}: GitHub {r.status_code}", r.status_code)
+        d = r.json()
+        if d.get("mergeable") is not None or d.get("state") != "open" or time.monotonic() >= deadline:
+            break
+        time.sleep(1.5)
+    return {"state": d.get("state"), "merged": bool(d.get("merged")), "mergeable": d.get("mergeable"),
+            "mergeable_state": d.get("mergeable_state"), "head": d["head"]["ref"], "base": d["base"]["ref"],
+            "head_sha": d["head"]["sha"], "url": d.get("html_url"), "title": d.get("title", "")}
+
+
+def comment_pr(token: str, full_name: str, number: int, body: str) -> None:
+    _call(token, "POST", f"/repos/{full_name}/issues/{number}/comments", json={"body": body})
 
 
 def close_pr(token: str, full_name: str, number: int, comment: str | None = None) -> None:

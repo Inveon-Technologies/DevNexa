@@ -12,7 +12,7 @@ import DataBackups from "./DataBackups";
 
 const SEV_TONE = { error: "red", warning: "amber" };
 const ISSUE_TONE = { open: "amber", fixing: "blue", in_preview: "violet", resolved: "green", ignored: "slate" };
-const PREVIEW_TONE = { deploying: "blue", ready: "green", failed: "red", merged: "indigo", rejected: "slate", stopped: "slate" };
+const PREVIEW_TONE = { deploying: "blue", ready: "green", failed: "red", merged: "indigo", rejected: "slate", stopped: "slate", resolving: "blue", conflict: "red" };
 const REL_TONE = { live: "green", backup: "cyan", removed: "slate" };
 
 function NeedsKey({ error }) {
@@ -182,8 +182,10 @@ function Previews({ app, show }) {
     if (verdict === "approve" && !window.confirm(`Merge ${p.branch} into ${p.base_branch} and redeploy ${app}?`)) return;
     if (verdict === "reject") { reason = window.prompt("Why? (optional)") ?? null; if (reason === null) return; }
     try {
-      await api.post(`/api/live/previews/${p.id}/${verdict}`, { actor: operatorName(), reason });
-      show(verdict === "approve" ? "Merged. Redeploying the app as a new version" : "Rejected and removed", "success");
+      const r = await api.post(`/api/live/previews/${p.id}/${verdict}`, { actor: operatorName(), reason });
+      show(verdict !== "approve" ? "Rejected and removed"
+        : r.status === "resolving_conflicts" ? "The branch conflicts with the base. The Merge Agent is resolving it, re-testing the result, and will merge and roll out once it is healthy"
+          : "Merged. Rolling out the new version with zero downtime", "success");
       reload();
     } catch (e) { show(e.message, "error"); }
   };
@@ -213,13 +215,14 @@ function Previews({ app, show }) {
                   {p.deployment && <Link className="text-slate-400 hover:underline" to="/deploy">logs: deploy #{p.deployment.id}</Link>}
                 </div>
                 {p.deployment?.error && <p className="text-xs text-rose-300">{p.deployment.error}</p>}
-                {["ready", "deploying", "failed"].includes(p.status) && (
+                {p.status === "resolving" && <p className="text-xs text-sky-300">Merge Agent: merging {p.base_branch} into {p.branch} and resolving conflicts…</p>}
+                {["ready", "deploying", "failed", "conflict"].includes(p.status) && (
                   <div className="flex gap-2 pt-1">
-                    <button className="btn-success py-1.5 text-xs" disabled={p.status !== "ready"} onClick={() => decide(p, "approve")}><CheckCircle2 className="h-3.5 w-3.5" /> Approve and merge</button>
+                    <button className="btn-success py-1.5 text-xs" disabled={!["ready", "conflict"].includes(p.status)} onClick={() => decide(p, "approve")}><CheckCircle2 className="h-3.5 w-3.5" /> {p.status === "conflict" ? "Retry merge" : "Approve and merge"}</button>
                     <button className="btn-ghost py-1.5 text-xs" onClick={() => decide(p, "reject")}><XCircle className="h-3.5 w-3.5" /> Reject</button>
                   </div>
                 )}
-                {p.note && <p className="text-xs text-slate-500">Note: {p.note}</p>}
+                {p.note && <p className={`text-xs ${p.status === "conflict" ? "text-rose-300" : "text-slate-500"}`}>Note: {p.note}</p>}
               </li>
             ))}
           </ul>

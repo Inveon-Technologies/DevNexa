@@ -45,6 +45,9 @@ APP_ACTIONS = {
                              "once it is healthy."),
     "add_dockerfile": AppAction("Add the generated Dockerfile to the repo", "low", True,
                                 "The repo had no Dockerfile; open a PR with the one DevNexa generated and deployed."),
+    "change_runtime": AppAction("Rebuild with the runtime version the project needs", "low", True,
+                                "The build asked for a newer (or older) Node, Python, Java or Go than the image had; "
+                                "rebuild on the version from the error."),
     "escalate": AppAction("Needs a developer", "low", True, "No safe automatic fix; the evidence is attached."),
 }
 
@@ -69,7 +72,7 @@ RULES: list[tuple[str, str, str, str, str, str, float]] = [
     ("disk_full", r"no space left on device", "Host disk is full", "The Docker host ran out of disk space.",
      "Prune unused images and build cache, then retry.", "prune_docker", 0.9),
     ("network", r"Could not resolve host|Temporary failure in name resolution|ETIMEDOUT|ECONNRESET|"
-                r"Read timed out|TLS handshake timeout|i/o timeout",
+                r"Read timed out|TLS handshake timeout|i/o timeout|Could not transfer artifact|Connection reset by peer",
      "Network hiccup during the build", "A download failed because of a network error.",
      "Retrying usually fixes this.", "retry_deploy", 0.75),
     ("pnpm_ignored_builds", r"ERR_PNPM_IGNORED_BUILDS|Ignored build scripts",
@@ -96,7 +99,35 @@ RULES: list[tuple[str, str, str, str, str, str, float]] = [
     ("pip_resolution", r"ResolutionImpossible|Could not find a version that satisfies|No matching distribution",
      "Python dependencies cannot be installed", "pip could not resolve the pinned versions.",
      "Relax or fix the version pins in requirements.txt.", "open_fix_pr", 0.8),
-    ("syntax_error", r"SyntaxError|IndentationError|error TS\d+|Failed to compile",
+    ("java_runtime", r"release version (\d+) not supported|invalid target release:? (\d+)|"
+                     r"class file version (\d+)\.0|Unsupported class file major version (\d+)",
+     "Java version mismatch", "The code targets a different Java version than the JDK in the image.",
+     "Rebuild on the JDK the code targets (DevNexa does this automatically), or set java.version in the build file.",
+     "change_runtime", 0.85),
+    ("node_runtime", r"engine \"node\" is incompatible.*?Expected version \"[^\d\"]*(\d+)|"
+                     r"Unsupported engine.*?node:\s*'[^\d']*(\d+)|requires Node(?:\.js)?(?: version)? [>=^~ v]*(\d{2})",
+     "Node.js version mismatch", "A package or the project needs a newer Node.js than the image had.",
+     "Rebuild on that Node.js version, and set engines.node in package.json.", "change_runtime", 0.85),
+    ("python_runtime", r"requires a different Python: [\d.]+ not in '[>=~^ ]*(3\.\d+)|"
+                       r"Requires-Python [>=~ ]*(3\.\d+)",
+     "Python version mismatch", "A dependency or the project needs a different Python version.",
+     "Rebuild on that Python version, and pin it in .python-version.", "change_runtime", 0.85),
+    ("go_runtime", r"go\.mod requires go >= ?(1\.\d+)|requires go(?: version)? >= ?(1\.\d+)",
+     "Go version mismatch", "go.mod (or a module) needs a newer Go toolchain than the image had.",
+     "Rebuild on that Go version.", "change_runtime", 0.85),
+    ("jar_no_main", r"no main manifest attribute",
+     "JAR has no main class", "The built JAR cannot be started with `java -jar`: its manifest has no Main-Class.",
+     "Use the Spring Boot plugin, or configure maven-jar/shade (Gradle: the application plugin) with the main class.",
+     "open_fix_pr", 0.8),
+    ("deps_resolution", r"Could not resolve dependencies for project|Your requirements could not be resolved|"
+                        r"Could not find gem|Bundler could not find compatible versions|failed to select a version for|"
+                        r"Unable to find package|NU1101|missing go\.sum entry",
+     "Dependencies cannot be installed", "The build tool could not resolve the declared dependency versions.",
+     "Fix the dependency name or version in the build file (or commit the missing lock/sum entries).",
+     "open_fix_pr", 0.8),
+    ("syntax_error", r"SyntaxError|IndentationError|error TS\d+|Failed to compile|COMPILATION ERROR|"
+                     r"error: cannot find symbol|Compilation failed|error\[E\d{4}\]|: undefined: \w+|"
+                     r"PHP Parse error|error CS\d{4}|syntax error, unexpected",
      "Code does not compile", "The build stops on a syntax or type error.",
      "Fix the error at the line shown in the log.", "open_fix_pr", 0.8),
     ("oom", r"OOMKilled|JavaScript heap out of memory|MemoryError|Killed\s*$",
@@ -124,6 +155,27 @@ def detected_port(log: str) -> int | None:
     return None
 
 
+# Java class-file major versions -> Java release
+CLASS_FILE_JAVA = {52: "8", 55: "11", 61: "17", 65: "21", 69: "25"}
+
+
+def runtime_version(cat: str, m: re.Match) -> str | None:
+    """The runtime version a *_runtime failure asks for (LTS for Java, major for Node, 3.x for Python)."""
+    groups = [g for g in m.groups() if g]
+    if not groups:
+        return None
+    v = groups[0]
+    if cat == "java_runtime":
+        if m.group(3) or m.group(4):  # class file version: 65 -> Java 21
+            major = int(m.group(3) or m.group(4))
+            v = next((j for c, j in sorted(CLASS_FILE_JAVA.items()) if major <= c), "25")
+        else:
+            v = next((str(lts) for lts in (8, 11, 17, 21, 25) if int(v) <= lts), "25")
+    if cat == "node_runtime":
+        v = next((str(n) for n in (18, 20, 22, 24) if int(v) <= n), "24")
+    return v
+
+
 def _evidence(log: str, pattern: str, n: int = 8) -> list[str]:
     lines = log.splitlines()
     rx = re.compile(pattern, re.I)
@@ -141,7 +193,15 @@ def heuristic(stage: str, log: str) -> dict:
             subject = next((g for g in m.groups() if g), None) if m.groups() else None
             if cat == "crash" and stage == "build":
                 title, action = "Build step failed", "escalate"
-            return {"category": cat, "title": title + (f": {subject}" if subject and cat.endswith("missing") else ""),
+            extra = {}
+            if cat.endswith("_runtime") and subject:
+                version = runtime_version(cat, m)
+                if version:
+                    extra = {"runtime_version": version}
+                    title = f"{title}: needs {cat.split('_')[0].title()} {version}"
+                else:
+                    action = "escalate"
+            return {**extra, "category": cat, "title": title + (f": {subject}" if subject and cat.endswith("missing") else ""),
                     "root_cause": why, "suggestion": fix, "action": action, "confidence": conf,
                     "subject": subject, "evidence": _evidence(log, pat), "stage": stage, "provider": "heuristic"}
     return {"category": "unknown", "title": f"{stage.title()} failed", "subject": None,
@@ -209,9 +269,11 @@ only when the fix is clear from the evidence)."""
 
 def _key_files(repo_dir: Path, log: str) -> dict[str, str]:
     names = ["Dockerfile", "package.json", "requirements.txt", "pyproject.toml", "main.py", "app.py",
-             "server.js", "index.js"]
+             "server.js", "index.js", "pom.xml", "build.gradle", "build.gradle.kts", "go.mod", "main.go", "Cargo.toml",
+             "Gemfile", "composer.json", "src/main/resources/application.properties"]
     names += re.findall(r'File "/app/([^"]+)"', log)[-3:]
     names += re.findall(r"/app/([\w./-]+\.(?:js|ts|py|go)):\d+", log)[-3:]
+    names += re.findall(r"/src/([\w./-]+\.(?:java|kt|go|rs|cs|php|rb))[:\[(]+\d+", log)[-3:]
     out = {}
     for n in dict.fromkeys(names):
         p = repo_dir / n
@@ -248,6 +310,10 @@ def llm_diagnose(analyzer: LLMAnalyzer, stage: str, log: str, repo_dir: Path | N
 
 def diagnose(db: Session, stage: str, log: str, repo_dir: Path | None = None, build_kind: str | None = None) -> dict:
     diag = heuristic(stage, log)
+    if diag["action"] == "change_runtime" and build_kind == "dockerfile":
+        # DevNexa does not own this Dockerfile's base image: say which version to put in FROM.
+        diag.update(action="escalate", suggestion=f"Change the FROM image in the repo's Dockerfile to "
+                                                  f"version {diag.get('runtime_version')}.")
     analyzer = get_analyzer()
     if isinstance(analyzer, LLMAnalyzer):
         diag = llm_diagnose(analyzer, stage, log, repo_dir, diag) or diag

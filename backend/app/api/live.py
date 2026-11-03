@@ -175,6 +175,8 @@ def decide_preview(preview_id: int, verdict: str, body: Verdict, db: Session = D
     db.commit()
     if res.get("deployment_id"):
         runner.submit(deploy_agent.run_deploy, res["deployment_id"])
+    if res.get("resolve"):  # merge conflicts: resolve, re-test on the test URL, then merge and roll out
+        runner.submit(fixer.resolve_and_merge, res["resolve"], body.actor)
     return res
 
 

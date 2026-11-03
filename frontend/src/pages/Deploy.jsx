@@ -1,6 +1,6 @@
 import {
-  Bot, CheckCircle2, Cpu, ExternalLink, GitBranch, Github, KeyRound, Lock, LogOut, MemoryStick, RefreshCw, Rocket,
-  Radar, Search, Server, Square, Terminal, Timer, XCircle,
+  Bot, CheckCircle2, Cpu, ExternalLink, FolderTree, GitBranch, Github, KeyRound, Layers, Lock, LogOut, MemoryStick,
+  RefreshCw, Rocket, Radar, Search, Server, Square, Terminal, Timer, XCircle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -109,6 +109,56 @@ function GitHubCard({ conn, me, reload, show }) {
   );
 }
 
+/** Smart deploy: shows the language, framework, build tool, runtime version and port DevNexa detected. */
+function StackPreview({ repo, branch, rootDir, onFolder }) {
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showFile, setShowFile] = useState(false);
+  useEffect(() => {
+    if (!repo || !branch) return undefined;
+    let stale = false;
+    const t = setTimeout(async () => {
+      setBusy(true); setErr("");
+      try {
+        const r = await api.post("/api/apps/detect", { repo, branch, root_dir: rootDir || "" });
+        if (!stale) setRes(r);
+      } catch (e) { if (!stale) { setRes(null); setErr(e.message); } } finally { if (!stale) setBusy(false); }
+    }, 500);
+    return () => { stale = true; clearTimeout(t); };
+  }, [repo, branch, rootDir]);
+  const plan = res?.plan;
+  return (
+    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-sm">
+      <p className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-slate-400"><Layers className="h-3.5 w-3.5" /> Detected stack {busy && <span className="normal-case text-slate-500">checking…</span>}</p>
+      {err && <p className="text-xs text-rose-300">{err}</p>}
+      {res && !plan && <p className="text-xs text-amber-300">{res.error}</p>}
+      {plan && (
+        <div className="space-y-2">
+          <p className="flex flex-wrap items-center gap-2 text-slate-100">
+            <span className="font-medium">{plan.stack}</span>
+            <Badge>port {plan.port}</Badge>
+            <Badge>{plan.uses_repo_dockerfile ? "repo Dockerfile" : "generated Dockerfile"}</Badge>
+            {plan.subdir && <Badge>in {plan.subdir}/</Badge>}
+          </p>
+          {plan.notes.map((n) => <p key={n} className="text-xs text-slate-400">{n}</p>)}
+          {plan.dockerfile && (
+            <>
+              <button className="text-xs text-indigo-300 hover:underline" onClick={() => setShowFile(!showFile)}>{showFile ? "Hide" : "Show"} the Dockerfile DevNexa will use</button>
+              {showFile && <pre className="max-h-56 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] text-slate-300">{plan.dockerfile}</pre>}
+            </>
+          )}
+        </div>
+      )}
+      {res?.folders?.length > 0 && (
+        <p className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500"><FolderTree className="h-3.5 w-3.5" /> Apps in folders:
+          {res.folders.map((f) => <button key={f} className="rounded bg-white/[0.05] px-1.5 py-0.5 font-mono text-slate-300 hover:bg-white/10" onClick={() => onFolder(rootDir ? `${rootDir}/${f}` : f)}>{f}/</button>)}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RepoPicker({ onDeployed, show, servers }) {
   const { data: repos, error } = usePoll("/api/github/repos", 0);
   const [q, setQ] = useState("");
@@ -197,6 +247,8 @@ function RepoPicker({ onDeployed, show, servers }) {
               <span className="mt-1 block text-[11px] text-slate-500"><Link className="text-indigo-300 hover:underline" to="/servers">Add or manage servers</Link></span>
             </label>
           </div>
+          <StackPreview repo={sel.full_name} branch={form.branch} rootDir={form.root_dir}
+            onFolder={(f) => setForm({ ...form, root_dir: f })} />
           <label className="block"><span className="label">Environment variables (KEY=value per line)</span>
             <textarea className="input h-20 font-mono" value={form.env} onChange={set("env")} />
           </label>
@@ -369,6 +421,7 @@ function Detail({ id, onSelect, show, servers }) {
           <div className="min-w-0">
             <p className="flex flex-wrap items-center gap-2 text-lg font-semibold text-white">{dep.app} <StatusBadge status={dep.status} /> {dep.status === "running" && <StatusBadge status={dep.health} />}</p>
             <p className="text-xs text-slate-500"><GitBranch className="mr-1 inline h-3 w-3" />{dep.repo} · {dep.branch} · {dep.commit_sha?.slice(0, 7) || "…"} {dep.commit_message ? `· ${dep.commit_message}` : ""}</p>
+            {dep.metrics?.stack && <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-400"><Layers className="h-3 w-3" />{dep.metrics.stack.stack}{dep.root_dir ? ` · ${dep.root_dir}/` : ""}</p>}
             <p className="text-xs text-slate-500"><Server className="mr-1 inline h-3 w-3" />{serverName(servers, dep) ? <>Runs on <Link className="text-indigo-300 hover:underline" to="/servers">{serverName(servers, dep)}</Link></> : "Runs on this DevNexa server"}</p>
             {dep.url && dep.status === "running" && (
               <a href={dep.url} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1.5 font-mono text-sm text-indigo-300 hover:underline">{dep.url} <ExternalLink className="h-3.5 w-3.5" /></a>

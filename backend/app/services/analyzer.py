@@ -260,14 +260,14 @@ class LLMAnalyzer:
             "evidence": ev,
         }, default=str)[:60000]
 
-    def _complete(self, system: str, user: str) -> str:
+    def _complete(self, system: str, user: str, max_tokens: int = 1500) -> str:
         s = self.s
         with httpx.Client(timeout=s.llm_timeout) as client:
             if self.provider == "anthropic":
                 r = client.post(
                     (s.llm_base_url or "https://api.anthropic.com") + "/v1/messages",
                     headers={"x-api-key": s.llm_api_key, "anthropic-version": "2023-06-01"},
-                    json={"model": s.llm_model, "max_tokens": 1500, "system": system,
+                    json={"model": s.llm_model, "max_tokens": max_tokens, "system": system,
                           "messages": [{"role": "user", "content": user}]},
                 )
                 r.raise_for_status()

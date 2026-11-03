@@ -58,6 +58,8 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(get_settings(), "apps_workdir", str(tmp_path / "work"))
     monkeypatch.setattr(get_settings(), "apps_domain", "devnexa.space")
     monkeypatch.setattr(get_settings(), "apps_health_timeout", 0)
+    monkeypatch.setattr(get_settings(), "apps_drain_seconds", 0)
+    monkeypatch.setattr(get_settings(), "apps_autodeploy_interval", 0)
     monkeypatch.setattr(deploy.time, "sleep", lambda s: None)
     monkeypatch.setattr(github, "get_token", lambda db, login=None: "ghp_secret_token_123")
     monkeypatch.setattr(deploy, "probe", lambda url: (200, 3.0))

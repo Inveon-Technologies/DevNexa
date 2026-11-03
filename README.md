@@ -95,11 +95,33 @@ The **Deploy from GitHub** page lets you connect a GitHub account, pick one of y
 deploy it as a container on the DevNexa server:
 
 1. **Clone** the branch with your token (the token is masked in every log line).
-2. **Detect** how to build it: the repo's own `Dockerfile`, or a generated one for Node (Express/Next, or Vite/CRA
-   served by nginx), Python (FastAPI, Flask, Django, Streamlit, plain script), Go, or a static `index.html` site.
+2. **Detect** the stack and how to build it (the page shows this before you deploy): the repo's own `Dockerfile`,
+   or a generated one for the language it finds. The runtime version comes from the project's own files.
+
+   | Language | Detected from | Frameworks / tools |
+   | --- | --- | --- |
+   | Node.js | `package.json` (`engines.node`) | Express, Next.js, NestJS, Nuxt, Fastify…; Vite/CRA SPAs served by nginx; npm, pnpm, yarn |
+   | Bun, Deno | `bun.lockb` / `bun.lock`, `deno.json` | `bun run start`, `deno task start` |
+   | Python | `requirements.txt`, `pyproject.toml`, `Pipfile`, `manage.py` (`.python-version`, `runtime.txt`, `requires-python`) | Django (gunicorn), FastAPI, Flask, Streamlit, Gradio, Procfile; pip, Poetry, Pipenv, uv |
+   | Java / Kotlin | `pom.xml`, `build.gradle(.kts)` (`java.version`, toolchain) | Spring Boot (`server.port`), WAR on Tomcat; Maven, Gradle, wrappers |
+   | Go | `go.mod` (`go 1.x`) | `cmd/<name>/main.go` layouts; Gin, Echo, Fiber, chi |
+   | Rust | `Cargo.toml` | Actix Web, Axum, Rocket |
+   | Ruby | `Gemfile` (`.ruby-version`) | Rails, Rack/Sinatra |
+   | PHP | `composer.json`, `index.php` | Laravel (document root `public/`), Composer |
+   | .NET | `*.csproj` / `*.fsproj` (`TargetFramework`) | ASP.NET Core |
+   | Static | `index.html` | nginx |
+
+   When the app is in a subfolder (`backend/`, `frontend/`, `server/` …) and the repo root has none, the folder is
+   picked automatically and remembered for redeploys; with several candidates the page lists them to choose from.
 3. **Build** with `docker build` and **start** the container on the compose network with memory/CPU limits.
-4. **Health-check** it over HTTP, then switch the app's URL to the new container (blue/green: the previous version
-   keeps serving until the new one is healthy, then it is removed).
+4. **Zero-downtime switch.** The current version keeps serving while the new container is health-checked; the URL
+   moves to the new one only after 3 health checks in a row pass (`DEVNEXA_APPS_READY_CHECKS`), and the old one
+   keeps running for 10 s (`DEVNEXA_APPS_DRAIN_SECONDS`) so requests in flight finish. A failed deploy never
+   touches the live version.
+5. **Auto-deploy.** Every new commit on the app's branch (a merged pull request or a push) is rolled out this way.
+   The GitHub push webhook does it instantly; without the webhook DevNexa checks the branch every 60 s
+   (`DEVNEXA_APPS_AUTODEPLOY_INTERVAL`). Each commit is tried once, so a broken commit does not loop. It can be
+   switched off per app in its pipeline settings.
 
 Build output and the running app's `docker logs` stream live to the page (server-sent events). The Monitoring
 Agent probes every running app every 15 s (HTTP status, latency, CPU, memory, error lines in the logs).
@@ -110,12 +132,16 @@ similar past fixes, apply **graded remediation** and **verify**, then **learn** 
 
 | Risk | Runs | Examples |
 | --- | --- | --- |
-| Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space |
+| Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, rebuild on the Node/Python/Java/Go version the error asks for (e.g. `release version 21 not supported`, `class file version 65`, `engine "node" is incompatible`), route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space |
 | Medium | after approval | double the memory limit after an out-of-memory kill, roll back to the last healthy image |
 | Code fix | automatically on a **new branch** (switch off in Risk policy: "Fix deploys on a new branch") | push the fix to `devnexa/fix-<app>-<id>`, deploy that branch to a preview URL `https://<app>-fix-<id>.<domain>`, and open a pull request only once the preview is healthy. Examples: add the missing package to `requirements.txt` / `package.json`, replace a repo Dockerfile that does not build with a generated one, or an LLM-written patch |
 
 Your base branch and the running app are never changed by an agent fix: you test the preview URL, merge the pull
-request, and the push webhook redeploys the app from the merged code.
+request, and the app is redeployed from the merged code (zero downtime, see above).
+
+Language-aware diagnosis also recognises Maven/Gradle/javac, Go, Rust, C#, PHP compile errors, dependency
+resolution failures (Maven, Composer, Bundler, Cargo, NuGet, `go.sum`) and JARs without a main class, and hands
+them with the evidence and the matching build files (`pom.xml`, `go.mod`, `Cargo.toml` …) to the LLM for a patch.
 
 **Repos that are not Docker-ready.** When a repo has no Dockerfile, DevNexa generates one for its stack and
 deploys with it. Once that deploy passes its health check, the agent opens a pull request
@@ -192,14 +218,24 @@ Pushing more commits to the branch redeploys the test URL. **Approve and merge**
 deployment and redeploys the app; **Reject** closes the PR and removes it. Any branch can get a test URL the same
 way ("Test a branch"). Without an LLM provider only mechanical fixes are possible, and the issue says so.
 
+**Merge conflicts.** When the branch conflicts with the base branch, approving it starts the Merge Agent: it merges
+the base into the PR branch and resolves each conflicted file with the safest rule that fits: lockfiles are taken
+from the base (the build reinstalls), `package.json`/`composer.json` and other JSON manifests get a key-by-key
+three-way merge, `.gitignore`/`requirements.txt`-style lists get both sides' lines, and in code a hunk where only one
+side changed, both made the same change, or one side only added lines is merged by rule. Real code conflicts go to
+the configured LLM, which must return the file without conflict markers. The merge commit is pushed to the PR branch
+(never the base), the test URL is rebuilt from it, and only when that passes its health check is the PR merged and
+the app rolled out. If something cannot be resolved, nothing is pushed: the preview shows **conflict**, the PR gets a
+comment listing the files a developer has to fix, and **Retry merge** tries again after they push.
+
 **Versions and backups.** Every successful deploy of the app's branch (a push, a merged fix, a redeploy) is tagged
 `devnexa-app/<app>:v<N>`; the previous versions are kept as backups (5 by default) and can be put live again with
 one click, without a rebuild. Backup schedules snapshot the running container (`docker commit`) every N hours and
 keep the last K; each schedule can be removed from the page.
 
 **Pipeline settings.** The deploy steps are listed in order; the optional ones can be switched off per app:
-keeping backups, the **load balancer** (2-4 containers of the live version, requests rotated across the healthy
-ones by the router), browser issue capture, and auto-fix.
+auto-deploy, keeping backups, the **load balancer** (2-4 containers of the live version, requests rotated across the
+healthy ones by the router), browser issue capture, and auto-fix.
 
 ## Data: smart backups, databases, trash and import
 
@@ -275,6 +311,8 @@ All settings are environment variables with the `DEVNEXA_` prefix (see `backend/
 | `DEVNEXA_APPS_DOMAIN` | | Serve deployed apps at `https://<app>.<domain>` (needs wildcard DNS) |
 | `DEVNEXA_GITHUB_TOKEN` | | Optional default GitHub token (otherwise connect one in the dashboard) |
 | `DEVNEXA_APPS_MEMORY` / `DEVNEXA_APPS_CPUS` | `512m` / `1.0` | Resource limits per deployed app |
+| `DEVNEXA_APPS_READY_CHECKS` / `DEVNEXA_APPS_DRAIN_SECONDS` | `3` / `10` | Zero-downtime switch: health checks in a row before traffic moves, seconds the old version drains |
+| `DEVNEXA_APPS_AUTODEPLOY_INTERVAL` | `60` | Seconds between checks of each app's branch for new commits (`0`: webhook only) |
 | `DEVNEXA_SERVERS_DIR` | `/tmp/devnexa-servers` | Where remote-server SSH keys and config are written (rebuilt from the database when missing) |
 
 If the LLM call fails, the analyzer falls back to the offline scorer and records that in the diagnosis.

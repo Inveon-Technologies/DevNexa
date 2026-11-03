@@ -57,7 +57,8 @@ def dep_dict(d: AppDeployment, full: bool = False) -> dict:
     out = to_dict(d, exclude=("build_log", "env") if not full else ("env",))
     out["env_keys"] = sorted((d.env or {}).keys())
     m = d.metrics or {}
-    out["metrics"] = m if full else {"last": m.get("last"), "history": (m.get("history") or [])[-30:]}
+    out["metrics"] = m if full else {"last": m.get("last"), "history": (m.get("history") or [])[-30:],
+                                     "stack": m.get("stack")}
     out["pending_approvals"] = sum(1 for r in d.remediations or [] if r["status"] == "pending_approval")
     return out
 
@@ -124,6 +125,26 @@ class DeployRequest(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     server_id: int | None = None  # None: the DevNexa host itself
     actor: str = "operator"
+
+
+class DetectRequest(BaseModel):
+    repo: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
+    branch: str = "main"
+    root_dir: str = ""
+
+
+@router.post("/apps/detect", dependencies=admin)
+def detect_stack(req: DetectRequest, request: Request, db: Session = Depends(get_db)):
+    """Smart deploy preview: which language, framework, build tool, runtime version and port DevNexa found."""
+    from ..services import buildplan
+
+    token = github.get_token(db, user(request))
+    if not token:
+        raise HTTPException(400, "Connect GitHub first.")
+    try:
+        return deploy.detect_repo(token, req.repo, req.branch, req.root_dir)
+    except buildplan.NotBuildable as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.get("/apps", dependencies=admin)
