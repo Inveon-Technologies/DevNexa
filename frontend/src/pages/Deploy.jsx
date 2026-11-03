@@ -1,6 +1,6 @@
 import {
   Bot, CheckCircle2, Cpu, ExternalLink, GitBranch, Github, KeyRound, Lock, LogOut, MemoryStick, RefreshCw, Rocket,
-  Radar, Search, Square, Terminal, Timer, XCircle,
+  Radar, Search, Server, Square, Terminal, Timer, XCircle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -109,7 +109,7 @@ function GitHubCard({ conn, me, reload, show }) {
   );
 }
 
-function RepoPicker({ onDeployed, show }) {
+function RepoPicker({ onDeployed, show, servers }) {
   const { data: repos, error } = usePoll("/api/github/repos", 0);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(null);
@@ -120,7 +120,7 @@ function RepoPicker({ onDeployed, show }) {
 
   const pick = async (r) => {
     setSel(r);
-    setForm({ branch: r.default_branch, app: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), port: "", root_dir: "", env: "" });
+    setForm({ branch: r.default_branch, app: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), port: "", root_dir: "", env: "", server_id: "" });
     setBranches([r.default_branch]);
     try { setBranches(await api.get(`/api/github/repos/${r.full_name}/branches`)); } catch { /* keep default */ }
   };
@@ -132,6 +132,7 @@ function RepoPicker({ onDeployed, show }) {
       const d = await api.post("/api/apps/deploy", {
         repo: sel.full_name, branch: form.branch, app: form.app || null, root_dir: form.root_dir,
         port: form.port ? Number(form.port) : null, env, actor: operatorName(),
+        server_id: form.server_id ? Number(form.server_id) : null,
       });
       show(`Deploying ${sel.name}…`, "success");
       setSel(null);
@@ -184,6 +185,17 @@ function RepoPicker({ onDeployed, show }) {
             <label><span className="label">Folder (optional)</span>
               <input className="input font-mono" placeholder="repo root" value={form.root_dir} onChange={set("root_dir")} />
             </label>
+            <label className="sm:col-span-2"><span className="label">Server</span>
+              <select className="input" value={form.server_id} onChange={set("server_id")}>
+                <option value="">This DevNexa server</option>
+                {(servers || []).map((s) => (
+                  <option key={s.id} value={s.id} disabled={s.status === "offline" || s.status === "no_docker"}>
+                    {s.name} ({s.host}){s.status === "online" ? "" : s.status === "new" ? " · not checked yet" : s.status === "no_docker" ? " · no Docker" : " · unreachable"}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-[11px] text-slate-500"><Link className="text-indigo-300 hover:underline" to="/servers">Add or manage servers</Link></span>
+            </label>
           </div>
           <label className="block"><span className="label">Environment variables (KEY=value per line)</span>
             <textarea className="input h-20 font-mono" value={form.env} onChange={set("env")} />
@@ -198,7 +210,13 @@ function RepoPicker({ onDeployed, show }) {
   );
 }
 
-function AppsList({ apps, selected, onSelect }) {
+function serverName(servers, d) {
+  const id = d?.options?.server_id;
+  if (!id) return null;
+  return (servers || []).find((s) => s.id === id)?.name || `server #${id}`;
+}
+
+function AppsList({ apps, selected, onSelect, servers }) {
   if (!apps) return <Loading />;
   if (!apps.length) return <Empty title="Nothing deployed yet" icon={Rocket}>Pick a repository to get a live URL.</Empty>;
   return (
@@ -213,7 +231,7 @@ function AppsList({ apps, selected, onSelect }) {
               className={`flex w-full flex-col gap-2 px-5 py-3 text-left transition hover:bg-white/[0.03] sm:flex-row sm:items-center ${selected === d.id ? "bg-white/[0.04]" : ""}`}>
               <div className="min-w-0 flex-1">
                 <p className="flex items-center gap-2 text-sm font-medium text-slate-100">{a.app} <StatusBadge status={d.status} /></p>
-                <p className="truncate text-xs text-slate-500">{a.repo} · {d.branch} · {ago(d.created_at)}</p>
+                <p className="truncate text-xs text-slate-500">{a.repo} · {d.branch} · {ago(d.created_at)}{serverName(servers, d) ? ` · on ${serverName(servers, d)}` : ""}</p>
                 {live?.url && <p className="truncate font-mono text-xs text-indigo-300">{live.url}</p>}
               </div>
               <div className="flex items-center gap-3 text-xs text-slate-400">
@@ -334,7 +352,7 @@ function AgentCard({ dep, reload, show }) {
   );
 }
 
-function Detail({ id, onSelect, show }) {
+function Detail({ id, onSelect, show, servers }) {
   const { data: dep, reload } = usePoll(`/api/apps/deployments/${id}`, 2000, [id]);
   const { data: history } = usePoll(dep ? `/api/apps/deployments?app=${dep.app}&limit=10` : null, 5000, [dep?.app]);
   if (!dep) return <Loading />;
@@ -351,6 +369,7 @@ function Detail({ id, onSelect, show }) {
           <div className="min-w-0">
             <p className="flex flex-wrap items-center gap-2 text-lg font-semibold text-white">{dep.app} <StatusBadge status={dep.status} /> {dep.status === "running" && <StatusBadge status={dep.health} />}</p>
             <p className="text-xs text-slate-500"><GitBranch className="mr-1 inline h-3 w-3" />{dep.repo} · {dep.branch} · {dep.commit_sha?.slice(0, 7) || "…"} {dep.commit_message ? `· ${dep.commit_message}` : ""}</p>
+            <p className="text-xs text-slate-500"><Server className="mr-1 inline h-3 w-3" />{serverName(servers, dep) ? <>Runs on <Link className="text-indigo-300 hover:underline" to="/servers">{serverName(servers, dep)}</Link></> : "Runs on this DevNexa server"}</p>
             {dep.url && dep.status === "running" && (
               <a href={dep.url} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1.5 font-mono text-sm text-indigo-300 hover:underline">{dep.url} <ExternalLink className="h-3.5 w-3.5" /></a>
             )}
@@ -434,6 +453,7 @@ export default function Deploy() {
   const unlocked = cfg && me && (!cfg.admin_required || adminKey() || me.signed_in);
   const { data: conn, error: connErr, reload: reloadConn } = usePoll(unlocked ? "/api/github" : null, 0);
   const { data: apps } = usePoll(unlocked && conn?.connected ? "/api/apps" : null, 4000);
+  const { data: servers } = usePoll(unlocked && conn?.connected ? "/api/servers" : null, 15000);
   const [selected, setSelected] = useState(null);
   const [toast, show] = useToast();
 
@@ -458,16 +478,16 @@ export default function Deploy() {
         <div className="grid gap-4 xl:grid-cols-[400px_minmax(0,1fr)]">
           <div className="space-y-4">
             <GitHubCard conn={conn} me={me} reload={reloadConn} show={show} />
-            {conn?.connected && <RepoPicker show={show} onDeployed={setSelected} />}
+            {conn?.connected && <RepoPicker show={show} onDeployed={setSelected} servers={servers} />}
             {conn?.connected && (
               <Card title="Your apps" icon={Rocket} bodyClass=""
                 subtitle={cfg?.url_mode === "subdomain" ? `Each app gets https://<name>.${cfg.apps_domain}` : "Each app gets its own port on this server"}>
-                <AppsList apps={apps} selected={selected} onSelect={setSelected} />
+                <AppsList apps={apps} selected={selected} onSelect={setSelected} servers={servers} />
               </Card>
             )}
           </div>
           <div className="min-w-0">
-            {selected ? <Detail id={selected} onSelect={setSelected} show={show} />
+            {selected ? <Detail id={selected} onSelect={setSelected} show={show} servers={servers} />
               : <Card><Empty title="No deployment selected" icon={Terminal}>Deploy a repo or pick an app to see its live logs and health.</Empty></Card>}
           </div>
         </div>

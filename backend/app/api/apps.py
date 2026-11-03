@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 from ..agents import deploy, runner
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import AppDeployment
-from ..services import auth, github
+from ..models import AppDeployment, Server
+from ..services import auth, github, servers
 from ..services.audit import audit
 from .serialize import to_dict
 
@@ -122,6 +122,7 @@ class DeployRequest(BaseModel):
     root_dir: str = ""
     port: int | None = Field(default=None, ge=1, le=65535)
     env: dict[str, str] = Field(default_factory=dict)
+    server_id: int | None = None  # None: the DevNexa host itself
     actor: str = "operator"
 
 
@@ -151,9 +152,18 @@ def list_app_deployments(app: str | None = None, limit: int = 50, db: Session = 
 @router.post("/apps/deploy", status_code=201, dependencies=admin)
 def deploy_repo(req: DeployRequest, request: Request, db: Session = Depends(get_db)):
     login = user(request)
+    options = {"port": req.port} if req.port else {}
+    if req.server_id:
+        server = db.get(Server, req.server_id)
+        if not server:
+            raise HTTPException(404, "server not found")
+        if server.status == "offline":
+            raise HTTPException(409, f"{server.name} did not answer its last check. Check it on the Servers page.")
+        if server.status == "no_docker":
+            raise HTTPException(409, f"{server.name} has no usable Docker. Install it from the Servers page.")
+        options["server_id"] = server.id
     if not github.get_token(db, login):
         raise HTTPException(400, "Connect GitHub first.")
-    options = {"port": req.port} if req.port else {}
     if login:
         options["gh_user"] = login  # clone, fix branches and PRs use this user's GitHub access
     dep = deploy.create_deployment(db, req.repo, req.branch, req.app, req.root_dir, req.env, options,
@@ -191,7 +201,11 @@ def stop(dep_id: int, request: Request, actor: str = "operator", db: Session = D
     actor = user(request) or actor
     d = _get(db, dep_id)
     if d.container:
-        deploy.executor.run(["docker", "rm", "-f", d.container])
+        try:
+            with servers.use_for(d):
+                deploy.executor.run(["docker", "rm", "-f", d.container])
+        except servers.ServerError:
+            pass  # the server was removed; nothing left to stop there
     if d.status == "running":
         from ..services import releases
 
@@ -244,10 +258,12 @@ async def _build_stream(dep_id: int):
         await asyncio.sleep(0.5)
 
 
-async def _runtime_stream(container: str):
+async def _runtime_stream(container: str, env: dict | None = None):
+    import os
+
     proc = await asyncio.create_subprocess_exec(
         "docker", "logs", "-f", "--tail", "300", "--timestamps", container,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env={**os.environ, **(env or {})})
     try:
         while True:
             try:
@@ -270,7 +286,7 @@ def stream_logs(dep_id: int, source: str = Query("build", pattern="^(build|runti
     if source == "runtime":
         if not d.container or not deploy.executor.available():
             raise HTTPException(400, "This deployment has no running container.")
-        gen = _runtime_stream(d.container)
+        gen = _runtime_stream(d.container, servers.env_for((d.options or {}).get("server_id")))
     else:
         gen = _build_stream(dep_id)
     return StreamingResponse(gen, media_type="text/event-stream",
