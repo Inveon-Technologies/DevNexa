@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Cpu, ExternalLink, Github, Layers, Network } from "lucide-react";
+import { api } from "../api";
 import LoopDiagram from "../components/LoopDiagram";
 import { Badge, Card, Loading, PageHeader } from "../components/ui";
 import { usePoll } from "../hooks";
@@ -21,6 +23,11 @@ const STACK = [
 
 export default function System() {
   const { data: s } = usePoll("/api/system", 0);
+  const [llm, setLlm] = useState(null);
+  const checkLlm = async () => {
+    setLlm({ busy: true });
+    try { setLlm(await api.get("/api/system/llm-check")); } catch (e) { setLlm({ ok: false, detail: e.message }); }
+  };
   return (
     <>
       <PageHeader eyebrow="Platform" title="Architecture & configuration"
@@ -37,6 +44,16 @@ export default function System() {
               ))}
             </dl>
           )}
+          <div className="mt-4 border-t border-white/[0.06] pt-3 text-sm">
+            <button type="button" className="btn-ghost" onClick={checkLlm} disabled={llm?.busy}>
+              {llm?.busy ? "Checking the LLM…" : "Test the LLM connection"}
+            </button>
+            {llm && !llm.busy && (
+              <p className={`mt-2 text-xs ${llm.ok ? "text-emerald-300" : "text-rose-300"}`}>
+                {llm.ok ? "Working" : "Not working"}{llm.model ? ` (${llm.provider}: ${llm.model})` : ""}: {llm.detail}
+              </p>
+            )}
+          </div>
         </Card>
         <Card title="Observability tools" subtitle="Available when running the docker-compose stack" icon={Network}>
           <ul className="space-y-2">

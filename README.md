@@ -132,9 +132,9 @@ similar past fixes, apply **graded remediation** and **verify**, then **learn** 
 
 | Risk | Runs | Examples |
 | --- | --- | --- |
-| Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, rebuild on the Node/Python/Java/Go version the error asks for (e.g. `release version 21 not supported`, `class file version 65`, `engine "node" is incompatible`), route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space |
+| Low (allowlisted) | automatically, if "auto-execute low risk" is on in Risk policy | retry after a network error, rebuild with `npm install` when the lockfile is out of sync, rebuild on the Node/Python/Java/Go version the error asks for (e.g. `release version 21 not supported`, `class file version 65`, `engine "node" is incompatible`), route to the port the app really listens on, restart a crashed container (up to 3 times), free Docker disk space, rebuild with `--legacy-peer-deps` after an npm `ERESOLVE` peer conflict, add python3/make/g++ when a native module (node-gyp) fails, bundle with `vite build` when only `tsc` type errors block it, serve the folder the build really wrote (`build/` vs `dist/`, `outDir`), retry when the port was still taken |
 | Medium | after approval | double the memory limit after an out-of-memory kill, roll back to the last healthy image |
-| Code fix | automatically on a **new branch** (switch off in Risk policy: "Fix deploys on a new branch") | push the fix to `devnexa/fix-<app>-<id>`, deploy that branch to a preview URL `https://<app>-fix-<id>.<domain>`, and open a pull request only once the preview is healthy. Examples: add the missing package to `requirements.txt` / `package.json`, replace a repo Dockerfile that does not build with a generated one, or an LLM-written patch |
+| Code fix | automatically on a **new branch** (switch off in Risk policy: "Fix deploys on a new branch") | push the fix to `devnexa/fix-<app>-<id>`, deploy that branch to a preview URL `https://<app>-fix-<id>.<domain>`, and open a pull request only once the preview is healthy. Examples: add the missing package to `requirements.txt` / `package.json`, add `legacy-peer-deps=true` to `.npmrc` after an `ERESOLVE` (the diagnosis also names the release that supports your React/peer version, looked up on the npm registry), fix an import whose case does not match the file name (Linux is case-sensitive), replace a repo Dockerfile that does not build with a generated one, or an LLM-written patch |
 
 Your base branch and the running app are never changed by an agent fix: you test the preview URL, merge the pull
 request, and the app is redeployed from the merged code (zero downtime, see above).
@@ -142,6 +142,11 @@ request, and the app is redeployed from the merged code (zero downtime, see abov
 Language-aware diagnosis also recognises Maven/Gradle/javac, Go, Rust, C#, PHP compile errors, dependency
 resolution failures (Maven, Composer, Bundler, Cargo, NuGet, `go.sum`) and JARs without a main class, and hands
 them with the evidence and the matching build files (`pom.xml`, `go.mod`, `Cargo.toml` …) to the LLM for a patch.
+
+**LLM errors.** When the LLM call fails, the diagnosis says why, e.g. `heuristic (LLM unavailable: HTTP 401
+invalid x-api-key (the API key is wrong or revoked ...))`. *Platform → Architecture & configuration → Test the LLM
+connection* (`GET /api/system/llm-check`, admin) makes one tiny call with the current settings. Known failures with a
+deterministic fix skip the LLM entirely.
 
 **Repos that are not Docker-ready.** When a repo has no Dockerfile, DevNexa generates one for its stack and
 deploys with it. Once that deploy passes its health check, the agent opens a pull request

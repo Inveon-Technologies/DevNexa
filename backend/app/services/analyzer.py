@@ -9,6 +9,7 @@ JSON diagnosis. Both return the same ``DiagnosisResult`` so the rest of the work
 from __future__ import annotations
 
 import json
+import time
 import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
@@ -235,6 +236,59 @@ proposed_action (one of the allowed actions), supporting_evidence (list of {kind
 alternatives (list of {cause_id, probability})."""
 
 
+class LLMError(RuntimeError):
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+HINTS = {401: "the API key is wrong or revoked (check DEVNEXA_LLM_API_KEY)",
+         403: "the API key has no access to this model or API",
+         404: "the model id or base URL is wrong (check DEVNEXA_LLM_MODEL / DEVNEXA_LLM_BASE_URL)",
+         400: "the request was rejected (often a wrong model id, or no credit left on the account)",
+         402: "the account has no credit left",
+         429: "rate limited or out of credit",
+         529: "the provider is overloaded"}
+
+
+def _provider_message(r: httpx.Response) -> str:
+    try:
+        d = r.json()
+        err = d.get("error") if isinstance(d, dict) else None
+        msg = (err.get("message") if isinstance(err, dict) else err) or d.get("message") or ""
+    except ValueError:
+        msg = r.text[:200]
+    hint = HINTS.get(r.status_code, "")
+    return f"HTTP {r.status_code}" + (f" {msg.strip()[:200]}" if msg else "") + (f" ({hint})" if hint else "")
+
+
+def describe_llm_error(e: Exception) -> str:
+    if isinstance(e, LLMError):
+        return str(e)
+    if isinstance(e, httpx.TimeoutException):
+        return f"timed out after {get_settings().llm_timeout:g}s"
+    if isinstance(e, httpx.HTTPError):
+        return f"cannot reach the provider ({type(e).__name__}: {e})"[:300]
+    if isinstance(e, (ValueError, KeyError)):
+        return f"reply was not valid JSON ({type(e).__name__})"
+    return f"{type(e).__name__}: {e}"[:300]
+
+
+def llm_check() -> dict:
+    """One tiny call to the configured provider, for the settings page and for operators."""
+    s = get_settings()
+    a = get_analyzer()
+    if not isinstance(a, LLMAnalyzer):
+        return {"ok": False, "provider": s.llm_provider, "model": None,
+                "detail": "No LLM configured: set DEVNEXA_LLM_PROVIDER=anthropic (or openai), DEVNEXA_LLM_MODEL "
+                          "and DEVNEXA_LLM_API_KEY in .env, then restart the backend."}
+    try:
+        text = a._complete("Reply with the single word OK.", "ping", max_tokens=5)
+        return {"ok": True, "provider": s.llm_provider, "model": s.llm_model, "detail": f"Reply: {text.strip()[:40]}"}
+    except Exception as e:
+        return {"ok": False, "provider": s.llm_provider, "model": s.llm_model, "detail": describe_llm_error(e)}
+
+
 class LLMAnalyzer:
     def __init__(self, provider: str):
         self.s = get_settings()
@@ -262,24 +316,41 @@ class LLMAnalyzer:
 
     def _complete(self, system: str, user: str, max_tokens: int = 1500) -> str:
         s = self.s
+        if not s.llm_api_key and self.provider == "anthropic":
+            raise LLMError("DEVNEXA_LLM_API_KEY is empty")
         with httpx.Client(timeout=s.llm_timeout) as client:
             if self.provider == "anthropic":
-                r = client.post(
-                    (s.llm_base_url or "https://api.anthropic.com") + "/v1/messages",
-                    headers={"x-api-key": s.llm_api_key, "anthropic-version": "2023-06-01"},
-                    json={"model": s.llm_model, "max_tokens": max_tokens, "system": system,
-                          "messages": [{"role": "user", "content": user}]},
-                )
-                r.raise_for_status()
+                url = (s.llm_base_url or "https://api.anthropic.com").rstrip("/") + "/v1/messages"
+                body = {"model": s.llm_model, "max_tokens": max_tokens, "system": system,
+                        "messages": [{"role": "user", "content": user}]}
+                r = self._post(client, url, {"x-api-key": s.llm_api_key, "anthropic-version": "2023-06-01"}, body)
                 return "".join(b.get("text", "") for b in r.json()["content"])
-            r = client.post(
-                (s.llm_base_url or "https://api.openai.com") + "/v1/chat/completions",
-                headers={"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {},
-                json={"model": s.llm_model, "temperature": 0,
-                      "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]},
-            )
-            r.raise_for_status()
+            url = (s.llm_base_url or "https://api.openai.com").rstrip("/")
+            url += "/chat/completions" if url.endswith("/v1") else "/v1/chat/completions"
+            body = {"model": s.llm_model, "temperature": 0, "max_completion_tokens": max_tokens,
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+            headers = {"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {}
+            try:
+                r = self._post(client, url, headers, body)
+            except LLMError as e:  # some models reject temperature or max_completion_tokens: retry plainly
+                if e.status != 400:
+                    raise
+                body = {k: v for k, v in body.items() if k not in ("temperature", "max_completion_tokens")}
+                r = self._post(client, url, headers, body)
             return r.json()["choices"][0]["message"]["content"]
+
+    @staticmethod
+    def _post(client: httpx.Client, url: str, headers: dict, body: dict) -> httpx.Response:
+        """POST with one retry on rate limits / overload, and an error that says what the provider said."""
+        for attempt in range(3):
+            r = client.post(url, headers=headers, json=body)
+            if r.status_code in (429, 500, 502, 503, 529) and attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if r.status_code >= 400:
+                raise LLMError(_provider_message(r), r.status_code)
+            return r
+        raise LLMError("no response", None)  # pragma: no cover
 
     @staticmethod
     def _parse(text: str) -> dict:
@@ -307,7 +378,7 @@ class LLMAnalyzer:
             )
         except Exception as e:  # network/parse problems fall back to the offline analyzer
             res = self.fallback.diagnose(ctx)
-            res.provider = f"heuristic (fallback: {type(e).__name__})"
+            res.provider = f"heuristic (LLM unavailable: {describe_llm_error(e)})"
             return res
 
     def explain_ci_failure(self, stage: str, log: str, files: list[str]) -> dict:

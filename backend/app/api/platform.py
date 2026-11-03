@@ -16,7 +16,7 @@ from ..evaluation.runner import DEFAULT_CONFIG, VARIANTS, run_experiment
 from ..models import (AuditLog, Deployment, ExperimentRun, Incident, KnowledgeEntry, PipelineRun, PolicyRule,
                       RemediationAction, TestCase)
 from ..services import policy
-from ..services.analyzer import CAUSES, get_analyzer
+from ..services.analyzer import CAUSES, get_analyzer, llm_check
 from ..services.audit import audit
 from ..services.embeddings import get_embedder
 from ..services.environment import get_environment
@@ -30,6 +30,12 @@ router = APIRouter(prefix="/api", tags=["platform"])
 @router.get("/health")
 def health():
     return {"status": "ok", "version": __version__}
+
+
+@router.get("/system/llm-check", dependencies=admin_only)
+def check_llm():
+    """Makes one tiny call to the configured LLM and says exactly what failed, if anything."""
+    return llm_check()
 
 
 @router.get("/system")

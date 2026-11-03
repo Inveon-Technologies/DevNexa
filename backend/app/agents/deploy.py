@@ -392,7 +392,7 @@ def _start_and_verify(dep_id, app, image, port, kind, env, options, out: DeployL
         audit(db, "deploy-agent", "app.running", "app_deployment", dep_id, f"{app} is live at {dep.url}")
         parent = db.get(AppDeployment, dep.parent_id) if dep.parent_id else None
         if parent and parent.diagnosis:
-            _verify_parent(db, parent, f"Deploy #{dep_id} succeeded")
+            _verify_parent(db, parent, f"Deploy #{dep_id} succeeded", dep_id)
         old_containers = [(o.container, (o.options or {}).get("server_id")) for o in older if o.container]
     if old_containers:  # the previous version may run on another server
         out(f"[switch] traffic now goes to {container}; {', '.join(c for c, _ in old_containers)} drains for "
@@ -434,10 +434,15 @@ def retire(containers: list, drain: float | None = None) -> None:
         t.start()
 
 
-def _verify_parent(db, parent: AppDeployment, detail: str):
+def _mine(r: dict, child_id: int | None) -> bool:
+    """Does remediation `r` belong to child deploy `child_id`? (Old entries carry no child id.)"""
+    return child_id is None or r.get("child_id") in (None, child_id)
+
+
+def _verify_parent(db, parent: AppDeployment, detail: str, child_id: int | None = None):
     rems = [dict(r) for r in parent.remediations or []]
     for r in rems:
-        if r["status"] in ("running", "executed"):
+        if r["status"] in ("running", "executed") and _mine(r, child_id):
             r.update(status="verified", verified_at=now().isoformat(), detail=r.get("detail", "") + f" · {detail}")
             app_doctor.remember(db, parent.diagnosis, parent.repo, r["action"], "fixed")
     parent.remediations = rems
@@ -456,7 +461,7 @@ def _fail(dep_id: int, stage: str, message: str, output: str, work: Path):
         if parent and parent.diagnosis:
             rems = [dict(r) for r in parent.remediations or []]
             for r in rems:
-                if r["status"] in ("running", "executed"):
+                if r["status"] in ("running", "executed") and _mine(r, dep_id) and not is_fix_check:
                     r.update(status="failed", detail=r.get("detail", "") + f" · deploy #{dep_id} failed again")
                     app_doctor.remember(db, parent.diagnosis, parent.repo, r["action"], "did_not_fix")
             parent.remediations = rems
@@ -532,6 +537,13 @@ def _last_good(db, dep: AppDeployment) -> AppDeployment | None:
     ).order_by(AppDeployment.id.desc())).first()
 
 
+REDEPLOY_ACTIONS = ("retry_deploy", "use_npm_install", "prune_docker", "raise_memory", "change_runtime",
+                    "use_legacy_peer_deps", "add_build_tools", "skip_typecheck", "change_output_dir")
+STABLE_FIX_BRANCH = {"npm_peer_deps"}  # the same fix every time: one branch, one PR
+OPTION_KEYS = ("npm_install", "memory", "runtime_version", "legacy_peer_deps", "build_tools", "skip_typecheck",
+               "spa_out")
+
+
 def execute(dep_id: int, rem_id: int, actor: str) -> dict:
     from . import runner
 
@@ -546,9 +558,17 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
         action = rem["action"]
         new = None
         result: dict = {}
-        if action in ("retry_deploy", "use_npm_install", "prune_docker", "raise_memory", "change_runtime"):
+        if action in REDEPLOY_ACTIONS:
             if action == "use_npm_install":
                 options["npm_install"] = True
+            if action == "use_legacy_peer_deps":
+                options["legacy_peer_deps"] = True
+            if action == "add_build_tools":
+                options["build_tools"] = True
+            if action == "skip_typecheck":
+                options["skip_typecheck"] = True
+            if action == "change_output_dir" and diag.get("spa_out"):
+                options["spa_out"] = diag["spa_out"]
             if action == "change_runtime" and diag.get("runtime_version"):
                 options["runtime_version"] = diag["runtime_version"]
             if action == "raise_memory":
@@ -556,7 +576,8 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
                 options["memory"] = f"{int(cur) * 2}m"
             new = create_deployment(db, options=options, **base)
             result = {"detail": f"Started deploy #{new.id}" + (" with " + json.dumps(
-                {k: options[k] for k in ("npm_install", "memory", "runtime_version") if k in options}) if action != "retry_deploy" else "")}
+                {k: options[k] for k in OPTION_KEYS if k in options}) if action != "retry_deploy" else ""),
+                      "child_id": new.id}
         elif action == "rollback_app":
             good = _last_good(db, dep)
             if not good:
@@ -564,7 +585,7 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
             else:
                 new = create_deployment(db, options={**options, "reuse_image": good.image, "port": good.port,
                                                      "build_kind": good.build_kind}, **base)
-                result = {"detail": f"Rolling back to image of deploy #{good.id} as deploy #{new.id}"}
+                result = {"detail": f"Rolling back to image of deploy #{good.id} as deploy #{new.id}", "child_id": new.id}
         elif action == "restart_app":
             pass
         elif action == "open_fix_pr":
@@ -594,7 +615,9 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
             if code == 0:
                 d.status, d.health = "running", "recovering"
     if action == "open_fix_pr" and diag.get("patch"):
-        fix_branch = f"devnexa/fix-{app}-{dep_id}"
+        # one branch (and so one PR) per kind of mechanical fix, so redeploying the same failure reuses it
+        fix_branch = f"devnexa/fix-{app}-" + (slugify(diag["category"]) if diag.get("category") in STABLE_FIX_BRANCH
+                                               else str(dep_id))
         files = {(f"{root_dir}/{p}" if root_dir else p): c for p, c in diag["patch"].items()}
         try:
             base_sha = sha or github.branch_sha(token, repo, branch)
@@ -611,12 +634,28 @@ def execute(dep_id: int, rem_id: int, actor: str) -> dict:
                 new_id = preview.id
             result = {"detail": f"Fix pushed to branch {fix_branch}; checking it on preview deploy #{new_id}. "
                                 "The pull request opens once the preview is healthy.",
-                      "branch": fix_branch, "preview_id": new_id}
+                      "branch": fix_branch, "preview_id": new_id, "child_id": new_id}
     result.setdefault("status", "executed")
     _set_rem(dep_id, rem_id, executed_at=now().isoformat(), decided_by=actor, **result)
     if new_id:
         runner.submit(run_deploy, new_id)
+    if action in REDEPLOY_ACTIONS and diag.get("patch"):
+        _follow_up_pr(dep_id, diag, actor)
     return result
+
+
+def _follow_up_pr(dep_id: int, diag: dict, actor: str) -> None:
+    """The redeploy works around the failure; this makes the repo itself build (e.g. `.npmrc` with
+    legacy-peer-deps) on a fix branch + preview + PR, so it does not depend on DevNexa's build flags."""
+    with session_scope() as db:
+        if not policy.get_autonomy(db).get("auto_fix_branch", True):
+            return
+    spec = app_doctor.APP_ACTIONS["open_fix_pr"]
+    rem_id = _record(dep_id, {"action": "open_fix_pr", "title": spec.title, "risk": spec.risk,
+                              "decision": "auto_execute", "status": "running", "has_patch": True,
+                              "reason": "Permanent fix for the repo, checked on a preview URL first. "
+                                        "Merging the pull request stays with you."})
+    execute(dep_id, rem_id, actor)
 
 
 def decide(dep_id: int, rem_id: int, approve: bool, actor: str) -> dict:
