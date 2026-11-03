@@ -149,7 +149,7 @@ function Issues({ app, ov, show }) {
         </div>
         <p className="mt-3 text-xs text-slate-500">
           Issues come from visitors' browsers (errors, failed API calls, blank pages and empty sections), the app's server logs and page scans.
-          {" "}<b className="text-slate-400">Point at a problem</b> opens your site in report mode: click the broken section and describe it.
+          {" "}<b className="text-slate-400">Point at a problem</b> opens your site with a small DevNexa bar. Use the site normally (log in, open other pages); the bar stays on every page. Press its <i>Point at a problem</i> button only when you reach the broken part, click it and describe it.
           {!ov.settings.steps.issue_capture && " Browser capture is off in Pipeline settings."}
         </p>
       </Card>

@@ -225,38 +225,75 @@ AGENT_JS = r"""(function () {
   ["pushState", "replaceState"].forEach(function (k) { var o = history[k]; history[k] = function () { var r = o.apply(this, arguments); later(); return r; }; });
   window.addEventListener("popstate", later);
 
-  // Report mode: open the site with ?devnexa-report=1 (or press Alt+Shift+R), click the broken section, describe it.
-  var picking = false, box = null, bar = null;
-  function report() {
-    if (picking) return; picking = true;
+  // Report mode: open the site with ?devnexa-report=1 (or press Alt+Shift+R). A small DevNexa bar stays on every page
+  // of the tab (sessionStorage), and the site works normally: log in, open other pages, fill forms. Press
+  // "Point at a problem" only when you are on the broken part; after one report it goes back to browsing.
+  var bar = null, box = null, picking = false;
+  var BTN = "margin-left:8px;background:#334155;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer;font:13px system-ui";
+  function css(el, t) { el.style.cssText = t; return el; }
+  function show() {
     try { sessionStorage.setItem("devnexa-report", "1"); } catch (e) {}
-    box = document.createElement("div");
-    box.style.cssText = "position:fixed;pointer-events:none;z-index:2147483646;border:2px solid #f43f5e;background:rgba(244,63,94,.08);border-radius:4px;transition:all .05s";
-    bar = document.createElement("div");
-    bar.style.cssText = "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483647;background:#0f172a;color:#fff;font:14px system-ui;padding:10px 14px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)";
-    bar.innerHTML = "DevNexa: click the section that has a problem &nbsp;<button style='margin-left:8px;background:#334155;color:#fff;border:0;border-radius:6px;padding:4px 8px;cursor:pointer'>Done</button>";
-    bar.querySelector("button").onclick = function (e) { e.stopPropagation(); stop(); };
+    if (bar) return render();
+    bar = css(document.createElement("div"), "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483647;" +
+      "background:#0f172a;color:#fff;font:14px system-ui;padding:8px 12px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35);" +
+      "display:flex;align-items:center;max-width:calc(100vw - 32px)");
+    bar.setAttribute("data-devnexa", "bar");
+    box = css(document.createElement("div"), "position:fixed;pointer-events:none;z-index:2147483646;border:2px solid #f43f5e;" +
+      "background:rgba(244,63,94,.08);border-radius:4px;display:none");
     document.body.appendChild(box); document.body.appendChild(bar);
-    document.addEventListener("mousemove", hover, true); document.addEventListener("click", pick, true);
+    render();
   }
-  function stop() {
-    picking = false; try { sessionStorage.removeItem("devnexa-report"); } catch (e) {}
-    document.removeEventListener("mousemove", hover, true); document.removeEventListener("click", pick, true);
-    box && box.remove(); bar && bar.remove();
+  function render(note) {
+    if (!bar) return;
+    bar.innerHTML = "";
+    var label = document.createElement("span");
+    label.textContent = note || (picking ? "Click the section that has a problem" : "DevNexa reporter: use the site normally");
+    bar.appendChild(label);
+    function btn(text, fn, primary) {
+      var b = css(document.createElement("button"), BTN + (primary ? ";background:#f43f5e" : ""));
+      b.type = "button"; b.textContent = text;
+      b.onclick = function (e) { e.preventDefault(); e.stopPropagation(); fn(); };
+      bar.appendChild(b);
+    }
+    if (picking) btn("Cancel", function () { setPicking(false); });
+    else { btn("Point at a problem", function () { setPicking(true); }, true); btn("Exit", hide); }
   }
-  function hover(e) { if (bar.contains(e.target)) return; var r = e.target.getBoundingClientRect(); box.style.left = r.left + "px"; box.style.top = r.top + "px"; box.style.width = r.width + "px"; box.style.height = r.height + "px"; }
+  function setPicking(on) {
+    picking = on;
+    if (on) { document.addEventListener("mousemove", hover, true); document.addEventListener("click", pick, true); }
+    else { document.removeEventListener("mousemove", hover, true); document.removeEventListener("click", pick, true);
+           if (box) box.style.display = "none"; }
+    render();
+  }
+  function hide() {
+    setPicking(false);
+    try { sessionStorage.removeItem("devnexa-report"); } catch (e) {}
+    bar && bar.remove(); box && box.remove(); bar = box = null;
+  }
+  function hover(e) {
+    if (bar.contains(e.target)) { box.style.display = "none"; return; }
+    var r = e.target.getBoundingClientRect();
+    box.style.display = "block"; box.style.left = r.left + "px"; box.style.top = r.top + "px";
+    box.style.width = r.width + "px"; box.style.height = r.height + "px";
+  }
   function pick(e) {
     if (bar.contains(e.target)) return;
     e.preventDefault(); e.stopPropagation();
-    var el = e.target, what = window.prompt("What is wrong with this section?");
+    var el = e.target;
+    setPicking(false);  // back to normal browsing whatever the answer
+    var what = window.prompt("What is wrong with this section?");
     if (what === null) return;
     seen = {}; send("user_report", { message: what || "Something is wrong here", selector: cssPath(el), section: sectionOf(el),
       html: (el.outerHTML || "").slice(0, 3000), text: (el.innerText || "").slice(0, 1000) });
-    bar.firstChild.textContent = "Thanks, sent to DevNexa. Click another section or ";
+    render("Thanks, sent to DevNexa.");
+    setTimeout(function () { render(); }, 3000);
   }
-  document.addEventListener("keydown", function (e) { if (e.altKey && e.shiftKey && (e.key === "R" || e.key === "r")) report(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.altKey && e.shiftKey && (e.key === "R" || e.key === "r")) { show(); setPicking(!picking); }
+    if (e.key === "Escape" && picking) setPicking(false);
+  });
   var wants = /[?&]devnexa-report=1/.test(location.search); try { wants = wants || sessionStorage.getItem("devnexa-report") === "1"; } catch (e) {}
-  if (wants) { if (document.body) report(); else document.addEventListener("DOMContentLoaded", report); }
+  if (wants) { if (document.body) show(); else document.addEventListener("DOMContentLoaded", show); }
 })();
 """
 
