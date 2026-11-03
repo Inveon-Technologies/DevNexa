@@ -201,6 +201,33 @@ keep the last K; each schedule can be removed from the page.
 keeping backups, the **load balancer** (2-4 containers of the live version, requests rotated across the healthy
 ones by the router), browser issue capture, and auto-fix.
 
+## Remote servers (deploy to other machines over SSH)
+
+The **Servers** page adds other Linux machines (another EC2 instance, a VPS, a lab box) as deploy targets.
+
+1. **Add a server**: name, host, SSH user and port. DevNexa generates an ed25519 key for it (or you paste your
+   own key, such as the EC2 `.pem`; passphrase-protected keys are refused because deploys run unattended).
+2. Run the **authorize command** it shows once on that server, then press **Check connection**. DevNexa logs in
+   and shows the OS, CPU, memory, disk, Docker version and every container. If Docker is missing, **Install
+   Docker** runs get.docker.com (the SSH user needs root or passwordless sudo).
+3. On **Deploy from GitHub**, pick the server in the **Server** dropdown. The default is the DevNexa host itself.
+
+How it works: each server's key, known host key and a `Host devnexa-server-<id>` block are written (mode 600)
+under `DEVNEXA_SERVERS_DIR`, and the backend's `~/.ssh/config` includes them. Every Docker command for an app on
+that server runs with `DOCKER_HOST=ssh://devnexa-server-<id>`, so the image is built and run by the server's own
+Docker engine, and the Deploy, Monitoring and Fix agents, releases, backups and rollbacks work the same as locally.
+The app publishes a port on the server (`port_base + deploy id % 1000`, 20000 and up by default). With
+`DEVNEXA_APPS_DOMAIN` set, `https://<app>.<domain>` still works: Caddy on the DevNexa host proxies to
+`<server address>:<port>`. Without it, the URL is `http://<server address>:<port>`. Redeploys, push deploys,
+agent fixes and test URLs stay on the app's server.
+
+The server page also has a **remote terminal** (one command at a time, as the SSH user, each one written to the
+audit log) and logs, restart, stop and start for every container. All of it needs the same sign-in as deploying.
+
+Network: the server's firewall or security group must allow SSH (22) from the DevNexa server, and the app port
+range from the DevNexa server (or from everyone, if you use the plain `http://host:port` URLs). The load-balancer
+replicas step runs only on the DevNexa host; apps on remote servers serve from one container.
+
 ## Live traffic and failing pages
 
 The dashboard opens on what users are doing right now: visitors, requests per minute, error rate and p95 response
@@ -235,6 +262,7 @@ All settings are environment variables with the `DEVNEXA_` prefix (see `backend/
 | `DEVNEXA_APPS_DOMAIN` | | Serve deployed apps at `https://<app>.<domain>` (needs wildcard DNS) |
 | `DEVNEXA_GITHUB_TOKEN` | | Optional default GitHub token (otherwise connect one in the dashboard) |
 | `DEVNEXA_APPS_MEMORY` / `DEVNEXA_APPS_CPUS` | `512m` / `1.0` | Resource limits per deployed app |
+| `DEVNEXA_SERVERS_DIR` | `/tmp/devnexa-servers` | Where remote-server SSH keys and config are written (rebuilt from the database when missing) |
 
 If the LLM call fails, the analyzer falls back to the offline scorer and records that in the diagnosis.
 

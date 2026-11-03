@@ -447,3 +447,30 @@ class AppPreview(Base):
     decided_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+# ------------------------------------------------------------ remote servers
+class Server(Base):
+    """Another machine DevNexa can deploy apps to and manage over SSH (its Docker engine is driven through
+    `DOCKER_HOST=ssh://...`). The DevNexa host itself is the implicit local server and has no row."""
+
+    __tablename__ = "servers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(60), unique=True)
+    host: Mapped[str] = mapped_column(String(255))
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(64), default="root")
+    private_key: Mapped[str] = mapped_column(Text)
+    public_key: Mapped[str] = mapped_column(Text)
+    known_hosts: Mapped[str] = mapped_column(Text, default="")
+    # Where app traffic reaches this server (IP or hostname). Defaults to `host`.
+    address: Mapped[str] = mapped_column(String(255), default="")
+    port_base: Mapped[int] = mapped_column(Integer, default=20000)
+    status: Mapped[str] = mapped_column(String(20), default="new")  # new|online|no_docker|offline
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="operator")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    checked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

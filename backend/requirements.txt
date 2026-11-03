@@ -9,3 +9,4 @@ numpy>=1.26
 psycopg[binary]>=3.2
 pgvector>=0.3
 prometheus-client>=0.20
+cryptography>=42
