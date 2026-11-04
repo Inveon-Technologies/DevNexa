@@ -55,7 +55,7 @@ class FixError(Exception):
 
 
 # ------------------------------------------------------------ file context
-def _tokens(issue: dict) -> list[str]:
+def _tokens(issue: dict, hint: str | None = None) -> list[str]:
     words = []
     words += [w for w in re.split(r"[/_\-.]+", issue.get("page") or "") if len(w) >= 3]
     for sel in (issue.get("selector") or "", issue.get("section") or ""):
@@ -65,12 +65,16 @@ def _tokens(issue: dict) -> list[str]:
     words += [re.sub(r"[-.][0-9a-f]{6,}$", "", m) for m in
               re.findall(r"/([A-Za-z][\w-]+?)(?:\.[0-9a-f]{6,})?\.(?:js|jsx|ts|tsx|py|vue)", issue.get("stack") or "")]
     sample = issue.get("sample") or {}
+    if hint:
+        words += [w[:-1] if len(w) > 5 and w.endswith("s") else w  # "validations" should find "validation"
+                  for w in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b", hint)[:10]]
     if issue.get("kind") == "user_report":  # words shown in the pointed-at section find the component rendering it
         words += [w for w in re.findall(r"[A-Za-z][A-Za-z'-]{4,}", sample.get("text") or "")][:12]
         words += re.findall(r'id="([\w-]+)"', sample.get("html") or "")[:6]
     stop = {"error", "failed", "returned", "undefined", "cannot", "read", "properties", "null", "with", "from",
             "this", "that", "function", "object", "uncaught", "typeerror", "referenceerror", "assets", "index",
-            "main", "http", "https", "section", "page", "type", "promise", "unhandled", "rejection", "script"}
+            "main", "http", "https", "section", "page", "type", "promise", "unhandled", "rejection", "script",
+            "kindly", "please", "added", "should", "make", "want", "here", "there", "working", "properly"}
     out = []
     for w in words:
         lw = w.lower()
@@ -79,8 +83,9 @@ def _tokens(issue: dict) -> list[str]:
     return out[:25]
 
 
-def related_files(root: Path, issue: dict, limit: int = 6, max_bytes: int = 30000) -> dict[str, str]:
-    toks = _tokens(issue)
+def related_files(root: Path, issue: dict, limit: int = 6, max_bytes: int = 30000,
+                  hint: str | None = None) -> dict[str, str]:
+    toks = _tokens(issue, hint)
     scored = []
     for p in root.rglob("*"):
         if not p.is_file() or p.suffix.lower() not in CODE_EXT or any(d in SKIP_DIRS for d in p.parts):
@@ -112,46 +117,96 @@ section as rendered; find the component that renders it in the given files.
 Otherwise find the cause in the given files and fix it with the smallest safe change.
 Reply with one JSON object and nothing else, with keys: title (short, imperative, e.g. "Handle empty cart on
 checkout"), root_cause (1-2 sentences), suggestion (what the change does), confidence (0..1),
-patch (list of {path, content} with the FULL new content of each changed file; at most 3 files; [] if you
-cannot see the cause in the files given). Only edit files that were given to you."""
+patch (list of {path, edits: [{find, replace}]}; `find` is text copied exactly from the given file that occurs
+in it once, `replace` is its new text; at most 3 files; [] if you cannot see the cause in the files given).
+Only edit files that were given to you."""
+
+
+FIX_MAX_TOKENS = 16000  # the reply carries code edits; 1500 tokens cut it off mid-JSON for any real component
+FIX_TIMEOUT = 240.0
+
+
+def apply_edits(original: str, edits: list) -> str | None:
+    """Apply [{find, replace}] edits; None if any `find` text isn't in the file exactly once."""
+    text = original
+    for e in edits:
+        if not isinstance(e, dict) or not isinstance(e.get("find"), str) or not isinstance(e.get("replace"), str):
+            return None
+        if not e["find"] or text.count(e["find"]) != 1:
+            return None
+        text = text.replace(e["find"], e["replace"])
+    return text
+
+
+def _patch_from(d: dict, files: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    patch, problems = {}, []
+    for item in (d.get("patch") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).lstrip("/")
+        if path not in files:
+            problems.append(f"{path} was not one of the files it was given")
+            continue
+        if isinstance(item.get("edits"), list):
+            new = apply_edits(files[path], item["edits"])
+            if new is None:
+                problems.append(f"its edit to {path} did not match the file's text")
+                continue
+        elif isinstance(item.get("content"), str):
+            new = item["content"]
+        else:
+            continue
+        if new != files[path]:
+            patch[path] = new
+    return patch, problems
 
 
 def propose(issue: dict, root: Path | None, hint: str | None = None) -> dict:
     """Return {title, root_cause, suggestion, confidence, provider, patch: {path: content} | None}."""
-    files = related_files(root, issue) if root else {}
+    files = related_files(root, issue, hint=hint) if root else {}
     analyzer = get_analyzer()
+    llm_error = None
     if isinstance(analyzer, LLMAnalyzer) and files:
         try:
             text = analyzer._complete(LLM_SYSTEM, json.dumps({
                 "issue": {k: issue.get(k) for k in ("kind", "message", "page", "section", "selector", "stack",
                                                      "count", "sample")},
                 "developer_hint": hint, "files": files,
-            })[:80000])
+            })[:80000], max_tokens=FIX_MAX_TOKENS, timeout=FIX_TIMEOUT)
             d = analyzer._parse(text)
-            patch = {}
-            for item in (d.get("patch") or [])[:3]:
-                path = str(item.get("path", "")).lstrip("/")
-                if path in files and isinstance(item.get("content"), str) and item["content"] != files[path]:
-                    patch[path] = item["content"]
+            patch, problems = _patch_from(d, files)
+            suggestion = str(d.get("suggestion") or "")
+            if not patch:
+                suggestion += (" The agent's change could not be applied: " + "; ".join(problems) + "."
+                               if problems else " The agent did not find what to change in: "
+                               + ", ".join(list(files)[:6]) + ". Describe the change in more detail and try again.")
             return {"title": str(d.get("title") or f"Fix {issue['kind']} on {issue['page']}")[:200],
-                    "root_cause": str(d.get("root_cause") or ""), "suggestion": str(d.get("suggestion") or ""),
+                    "root_cause": str(d.get("root_cause") or ""), "suggestion": suggestion.strip(),
                     "confidence": max(0.0, min(1.0, float(d.get("confidence") or 0.5))), "provider": analyzer.name,
                     "patch": patch or None, "files_considered": list(files)}
-        except Exception as e:  # noqa: BLE001 - fall back to the heuristic diagnosis
+        except Exception as e:  # noqa: BLE001 - fall back to the heuristic diagnosis, but say why
             log.warning("LLM fix proposal failed: %s", e)
+            llm_error = (f"{type(e).__name__}: {e}" if str(e) else type(e).__name__)[:300]
     text = "\n".join(filter(None, [issue.get("stack"), issue.get("message")]))
     diag = app_doctor.heuristic("runtime", text)
     patch = app_doctor.heuristic_patch(diag, root) if root else None
-    reason = "" if patch else (" Set DEVNEXA_LLM_PROVIDER (anthropic or openai) so the Fix Agent can write code "
-                               "changes for issues like this." if not isinstance(analyzer, LLMAnalyzer) else
-                               " The agent could not locate the cause in the repository.")
+    if patch:
+        reason = ""
+    elif not isinstance(analyzer, LLMAnalyzer):
+        reason = (" Set DEVNEXA_LLM_PROVIDER (anthropic or openai) so the Fix Agent can write code changes for "
+                  "issues like this.")
+    elif llm_error:
+        reason = (f" The AI call failed ({llm_error}). Check the LLM with the Test button on the System page, "
+                  "then try again.")
+    else:
+        reason = " No code files in the repository matched this issue."
     return {"title": diag["title"] if patch else f"Fix {issue['kind'].replace('_', ' ')} on {issue['page']}",
             "root_cause": diag["root_cause"] if diag["category"] != "unknown" else "Not determined automatically.",
             "suggestion": (diag["suggestion"] if diag["category"] != "unknown" else "A developer needs to look.") + reason,
-            "confidence": diag["confidence"], "provider": "heuristic", "patch": patch, "files_considered": list(files)}
+            "confidence": diag["confidence"], "provider": "heuristic", "patch": patch, "files_considered": list(files),
+            "llm_error": llm_error}
 
 
-# --------------------------------------------------------------- fix flow
 def _clone(token: str, repo: str, ref: str, dest: Path) -> None:
     from . import deploy
 

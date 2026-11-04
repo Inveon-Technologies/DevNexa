@@ -2,7 +2,7 @@ import {
   Archive, Bug, CheckCircle2, ExternalLink, FlaskConical, GitBranch, GitPullRequest, History, Lock, MousePointerClick,
   Plus, Radar, RotateCcw, Settings2, Trash2, Wrench, XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, operatorName } from "../api";
 import { Badge, Card, Empty, ErrorBox, Loading, PageHeader, StatusBadge, Tabs, Toast, Toggle } from "../components/ui";
@@ -62,6 +62,16 @@ function IssueRow({ issue, app, reload, show }) {
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
   const f = issue.fix || {};
+  const working = ["queued", "diagnosing", "opening_pr"].includes(f.status);
+  const prevStatus = useRef(f.status);
+  useEffect(() => {  // say when a background fix finishes, so a result never appears silently
+    const was = prevStatus.current;
+    prevStatus.current = f.status;
+    if (!["queued", "diagnosing", "opening_pr"].includes(was) || was === f.status) return;
+    if (f.status === "preview") show("Fix Agent opened a branch and is deploying a test URL", "success");
+    else if (f.status === "no_patch") show("Fix Agent could not make this change: see the reason under the issue", "error");
+    else if (f.status === "failed") show(`Fix Agent failed: ${f.error || "see the issue"}`, "error");
+  }, [f.status]);
   const fix = async () => {
     setBusy(true);
     try {
@@ -100,6 +110,8 @@ function IssueRow({ issue, app, reload, show }) {
           {f.status && (
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-sm">
               <p className="flex flex-wrap items-center gap-2 text-slate-200"><Wrench className="h-4 w-4" /> Fix Agent: <Badge tone={f.status === "failed" || f.status === "no_patch" ? "amber" : "indigo"}>{f.status.replace("_", " ")}</Badge></p>
+              {working && <p className="mt-2 text-slate-400">{f.status === "opening_pr" ? "Committing the change to a new branch…" : "Reading the code and asking the AI for a change… this can take a minute or two."}</p>}
+              {f.diagnosis && !working && f.diagnosis.files_considered?.length > 0 && f.status === "no_patch" && <p className="mt-1 text-xs text-slate-500">Files it looked at: <span className="font-mono">{f.diagnosis.files_considered.join(", ")}</span></p>}
               {f.diagnosis && <p className="mt-2 text-slate-300">{f.diagnosis.root_cause} <span className="text-slate-400">{f.diagnosis.suggestion}</span></p>}
               {f.error && <p className="mt-2 text-rose-300">{f.error}</p>}
               {f.pr_url && <a className="mt-2 inline-flex items-center gap-1 text-xs text-indigo-300" href={f.pr_url} target="_blank" rel="noreferrer"><GitPullRequest className="h-3.5 w-3.5" /> Pull request #{f.pr_number}</a>}

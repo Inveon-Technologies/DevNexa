@@ -295,3 +295,57 @@ def test_agent_tokens_use_the_pointed_section_text():
     toks = fixer._tokens({"kind": "user_report", "message": "make it blue", "page": "/",
                           "sample": {"text": "Contact Vaibhav today", "html": '<h2 id="contact-title">x</h2>'}})
     assert "contact" in toks and "contact-title" in toks
+
+
+from app.services.analyzer import LLMAnalyzer  # noqa: E402
+
+
+class _FakeLLM(LLMAnalyzer):
+    def __init__(self, reply=None, error=None):
+        self.reply, self.error, self.name, self.calls = reply, error, "fake-llm", []
+
+    def _complete(self, system, user, max_tokens=1500, timeout=None):
+        self.calls.append(max_tokens)
+        if self.error:
+            raise self.error
+        return self.reply
+
+    @staticmethod
+    def _parse(text):
+        import json
+
+        return json.loads(text)
+
+
+def test_llm_fix_applies_find_replace_edits_found_via_hint(tmp_path, monkeypatch):
+    import json
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "InviteForm.jsx").write_text("function InviteForm() {\n  return <input name='email' />;\n}\n")
+    (tmp_path / "src" / "Other.jsx").write_text("export default 1\n")
+    llm = _FakeLLM(json.dumps({"title": "Validate invite email", "root_cause": "No validation.",
+                               "suggestion": "Adds required.", "confidence": 0.8,
+                               "patch": [{"path": "src/InviteForm.jsx", "edits": [
+                                   {"find": "<input name='email' />", "replace": "<input name='email' required />"}]}]}))
+    monkeypatch.setattr(fixer, "get_analyzer", lambda: llm)
+    prop = fixer.propose({"kind": "user_report", "message": "add validation", "page": "/", "selector": "form"},
+                         tmp_path, hint="InviteForm needs validations")
+    assert prop["patch"] == {"src/InviteForm.jsx": "function InviteForm() {\n  return <input name='email' required />;\n}\n"}
+    assert llm.calls == [fixer.FIX_MAX_TOKENS]
+
+
+def test_llm_failure_is_shown_in_the_diagnosis(tmp_path, monkeypatch):
+    (tmp_path / "App.jsx").write_text("const checkout = 1\n")
+    monkeypatch.setattr(fixer, "get_analyzer", lambda: _FakeLLM(error=ValueError("402 insufficient credits")))
+    prop = fixer.propose({"kind": "user_report", "message": "checkout broken", "page": "/"}, tmp_path)
+    assert prop["patch"] is None and "402 insufficient credits" in prop["suggestion"]
+
+
+def test_unmatched_llm_edit_is_explained(tmp_path, monkeypatch):
+    import json
+
+    (tmp_path / "App.jsx").write_text("const checkout = 1\n")
+    monkeypatch.setattr(fixer, "get_analyzer", lambda: _FakeLLM(json.dumps({
+        "title": "t", "patch": [{"path": "App.jsx", "edits": [{"find": "nope", "replace": "x"}]}]})))
+    prop = fixer.propose({"kind": "user_report", "message": "checkout broken", "page": "/"}, tmp_path)
+    assert prop["patch"] is None and "did not match" in prop["suggestion"]
