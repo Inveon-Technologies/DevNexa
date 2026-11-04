@@ -13,6 +13,7 @@ from ..agents import fixer, runner
 from ..agents import deploy as deploy_agent
 from ..db import get_db
 from ..models import AppDeployment, AppIssue, AppPreview, AppRelease
+from ..services import auth as auth_svc
 from ..services import github, issues, owners, releases
 from ..services.audit import audit
 from .apps import _app_from_host, app_scoped, check_app, dep_dict, signed_in, user
@@ -134,6 +135,26 @@ def scan_pages(app: str, db: Session = Depends(get_db)):
     audit(db, "operator", "app.scan", "app", None, f"{app}: scanned {res['pages']} pages, {res['issues']} issues")
     db.commit()
     return res
+
+
+REPORT_LINK_HOURS = 12
+
+
+@router.post("/apps/{app}/report-link", dependencies=app_scoped)
+def report_link(app: str, request: Request, db: Session = Depends(get_db)):
+    """A signed link that opens the live site in report mode. Reports sent through it come from someone who may
+    change the app, so the Fix Agent starts on them at once (problems and change requests alike)."""
+    live = releases.live_deployment(db, app)
+    if not live or not live.url:
+        raise HTTPException(400, "The app is not running.")
+    token = auth_svc.sign(db, {"report": app, "by": user(request) or "operator",
+                               "exp": int(__import__("time").time()) + REPORT_LINK_HOURS * 3600})
+    return {"url": f"{live.url.rstrip('/')}/?devnexa-report={token}", "expires_in_hours": REPORT_LINK_HOURS}
+
+
+def _report_author(db: Session, app: str, token) -> str | None:
+    data = auth_svc.verify(db, token) if isinstance(token, str) and len(token) < 2000 else None
+    return data.get("by") if data and data.get("report") == app else None
 
 
 # --------------------------------------------------------- test URLs / PRs
@@ -297,6 +318,14 @@ async def report(request: Request, db: Session = Depends(get_db)):
     if not db.scalars(select(AppDeployment.id).where(AppDeployment.app == app)).first():
         return Response(status_code=204)
     issue = issues.ingest_report(db, app, data)
+    author = _report_author(db, app, data.get("token")) if data.get("kind") == "user_report" else None
+    if issue and author and issue.status not in ("fixing", "in_preview"):
+        # pointed at by someone who owns the app: problem or change request, the AI works on it now
+        issue.status, issue.fix = "fixing", {"status": "queued", "started_by": author, "at": fixer.now().isoformat(),
+                                             "requested": "report_mode"}
+        db.commit()
+        runner.submit(fixer.start_fix, issue.id, author, str(data.get("message") or "")[:1000])
+        return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
     auto = bool(issue and fixer.should_auto_fix(db, issue))
     if auto:
         issue.fix = {"status": "queued", "started_by": "fix-agent", "at": fixer.now().isoformat()}

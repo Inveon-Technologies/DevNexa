@@ -29,6 +29,9 @@ async function request(path, options = {}) {
     } catch {
       /* not json */
     }
+    if (Array.isArray(detail)) { // FastAPI validation errors: [{loc, msg}, ...]
+      detail = detail.map((d) => `${(d.loc || []).filter((x) => x !== "body").join(".")}: ${d.msg}`).join("; ");
+    }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return res.json();
@@ -60,6 +63,9 @@ async function rawFetch(path, options = {}) {
       detail = (await res.json()).detail || detail;
     } catch {
       /* not json */
+    }
+    if (Array.isArray(detail)) { // FastAPI validation errors: [{loc, msg}, ...]
+      detail = detail.map((d) => `${(d.loc || []).filter((x) => x !== "body").join(".")}: ${d.msg}`).join("; ");
     }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }

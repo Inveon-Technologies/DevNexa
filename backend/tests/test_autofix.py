@@ -205,3 +205,40 @@ def test_known_mechanical_fixes_skip_the_llm(monkeypatch, tmp_path, client, no_r
 
     assert app_doctor.diagnose(SessionLocal(), "build", ERESOLVE_LOG, tmp_path, "node-static")["action"] == \
         "use_legacy_peer_deps"
+
+
+def test_test_url_for_a_missing_branch_says_so(monkeypatch):
+    from app.agents import fixer
+    from app.services import github as gh
+
+    class Dep:
+        branch, repo = "main", "vaibhav/site"
+
+    monkeypatch.setattr(fixer.releases, "live_deployment", lambda db, app: Dep())
+    monkeypatch.setattr(fixer, "_token", lambda db, app: "t")
+
+    def missing(token, repo, branch):
+        raise gh.GitHubError("not found", 404)
+    monkeypatch.setattr(gh, "branch_sha", missing)
+    with pytest.raises(ValueError, match="no branch called feature/x"):
+        fixer.preview_branch(None, "site", "feature/x", "me")
+
+
+def test_test_url_without_new_commits_still_deploys(monkeypatch):
+    from app.agents import fixer
+    from app.services import github as gh
+
+    class Dep:
+        branch, repo = "main", "vaibhav/site"
+
+    monkeypatch.setattr(fixer.releases, "live_deployment", lambda db, app: Dep())
+    monkeypatch.setattr(fixer, "_token", lambda db, app: "t")
+    monkeypatch.setattr(gh, "branch_sha", lambda token, repo, branch: "abc")
+
+    def no_commits(*a, **k):
+        raise gh.GitHubError("Could not open the pull request: GitHub 422 No commits between main and dev", 422)
+    monkeypatch.setattr(gh, "find_or_open_pr", no_commits)
+    seen = {}
+    monkeypatch.setattr(fixer, "_create_preview", lambda app, repo, base, branch, pr, title, actor:
+                        seen.update(pr=pr, branch=branch) or 7)
+    assert fixer.preview_branch(None, "site", "dev", "me") == 7 and seen == {"pr": None, "branch": "dev"}
