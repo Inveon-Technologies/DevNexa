@@ -91,3 +91,21 @@ def test_sim_clock():
     c.advance(90)
     assert (c.now() - t0).total_seconds() == 90
     assert RunContext  # imported for API stability
+
+
+def test_nul_bytes_are_stripped_before_saving(client):
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import AuditLog
+
+    with session_scope() as db:
+        db.add(AuditLog(actor="t", action="nul-test", entity_type="app", message="npm\x00 log",
+                        details={"out": ["a\x00b", {"k\x00": "v\x00"}]}))
+    with session_scope() as db:
+        row = db.scalars(select(AuditLog).where(AuditLog.action == "nul-test")).one()
+        assert row.message == "npm log"
+        assert row.details == {"out": ["ab", {"k": "v"}]}
+        row.message = "again\x00"
+    with session_scope() as db:
+        assert db.scalars(select(AuditLog).where(AuditLog.action == "nul-test")).one().message == "again"

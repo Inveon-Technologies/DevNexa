@@ -32,6 +32,31 @@ class Base(DeclarativeBase):
     pass
 
 
+def strip_nul(value):
+    """PostgreSQL text and JSON can't hold NUL (0x00) bytes, but build logs, container output and files read from
+    a repo sometimes contain them. Drop them (recursively in JSON values) so one stray byte can't fail a save."""
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {strip_nul(k): strip_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [strip_nul(v) for v in value]
+    return value
+
+
+@event.listens_for(Session, "before_flush")
+def _strip_nul_bytes(session, _ctx, _instances):
+    from sqlalchemy import inspect as sa_inspect
+
+    for obj in list(session.new) + list(session.dirty):
+        for attr in sa_inspect(obj).mapper.column_attrs:
+            value = getattr(obj, attr.key, None)
+            if isinstance(value, (str, dict, list)):
+                cleaned = strip_nul(value)
+                if cleaned != value:
+                    setattr(obj, attr.key, cleaned)
+
+
 class EmbeddingType(TypeDecorator):
     """pgvector `vector(n)` on PostgreSQL, JSON list everywhere else (SQLite for local dev/tests)."""
 
