@@ -314,11 +314,11 @@ class LLMAnalyzer:
             "evidence": ev,
         }, default=str)[:60000]
 
-    def _complete(self, system: str, user: str, max_tokens: int = 1500) -> str:
+    def _complete(self, system: str, user: str, max_tokens: int = 1500, timeout: float | None = None) -> str:
         s = self.s
         if not s.llm_api_key and self.provider == "anthropic":
             raise LLMError("DEVNEXA_LLM_API_KEY is empty")
-        with httpx.Client(timeout=s.llm_timeout) as client:
+        with httpx.Client(timeout=max(s.llm_timeout, timeout or 0)) as client:
             if self.provider == "anthropic":
                 url = (s.llm_base_url or "https://api.anthropic.com").rstrip("/") + "/v1/messages"
                 body = {"model": s.llm_model, "max_tokens": max_tokens, "system": system,
