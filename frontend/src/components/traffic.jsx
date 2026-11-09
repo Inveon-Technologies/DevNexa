@@ -11,21 +11,21 @@ export function TrafficChart({ series, height = "h-56" }) {
         <AreaChart data={series.slice(0, -1)} margin={{ left: -18, right: 8, top: 8 }}>
           <defs>
             <linearGradient id="reqFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#818cf8" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="#818cf8" stopOpacity={0} />
+              <stop offset="0%" stopColor="#2563eb" stopOpacity={0.35} />
+              <stop offset="100%" stopColor="#2563eb" stopOpacity={0} />
             </linearGradient>
             <linearGradient id="errFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#fb7185" stopOpacity={0.45} />
-              <stop offset="100%" stopColor="#fb7185" stopOpacity={0} />
+              <stop offset="0%" stopColor="#e11d48" stopOpacity={0.45} />
+              <stop offset="100%" stopColor="#e11d48" stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid vertical={false} />
           <XAxis dataKey="t" tickFormatter={hhmm} axisLine={false} tickLine={false} minTickGap={40} />
           <YAxis allowDecimals={false} axisLine={false} tickLine={false} />
-          <Tooltip {...chartTooltip} cursor={{ stroke: "rgba(255,255,255,0.15)" }} labelFormatter={hhmm} />
-          <Area type="monotone" dataKey="requests" name="Requests" stroke="#818cf8" strokeWidth={2} fill="url(#reqFill)"
+          <Tooltip {...chartTooltip} cursor={{ stroke: "rgba(11,27,63,0.2)" }} labelFormatter={hhmm} />
+          <Area type="monotone" dataKey="requests" name="Requests" stroke="#2563eb" strokeWidth={2} fill="url(#reqFill)"
                 isAnimationActive={false} />
-          <Area type="monotone" dataKey="errors" name="Server errors" stroke="#fb7185" strokeWidth={2} fill="url(#errFill)"
+          <Area type="monotone" dataKey="errors" name="Server errors" stroke="#e11d48" strokeWidth={2} fill="url(#errFill)"
                 isAnimationActive={false} />
         </AreaChart>
       </ResponsiveContainer>

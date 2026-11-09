@@ -6,7 +6,7 @@ import { Badge, Card, chartTooltip, ErrorBox, Loading, PageHeader, StatusBadge }
 import { duration, pct, time } from "../format";
 import { usePoll } from "../hooks";
 
-const COLORS = { devnexa: "#818cf8", no_rag: "#22d3ee", baseline: "#64748b" };
+const COLORS = { devnexa: "#2563eb", no_rag: "#c026d3", baseline: "#94a3b8" };
 const METRICS = [
   { key: "failure_detection_s", label: "Failure detection time", fmt: duration, better: "lower" },
   { key: "rca_accuracy", label: "Root-cause accuracy (1st diagnosis)", fmt: (v) => pct(v), better: "higher" },
@@ -64,7 +64,7 @@ function Results({ exp }) {
                   <XAxis dataKey="id" axisLine={false} tickLine={false} />
                   <YAxis axisLine={false} tickLine={false} />
                   <Tooltip {...chartTooltip} formatter={(v) => [+v.toFixed(2), t]} />
-                  <Bar dataKey="value" radius={[6, 6, 0, 0]} fill="#818cf8" shape={(p) => <rect x={p.x} y={p.y} width={p.width} height={p.height} rx={6} fill={COLORS[p.payload.id]} />} />
+                  <Bar dataKey="value" radius={[6, 6, 0, 0]} fill="#2563eb" shape={(p) => <rect x={p.x} y={p.y} width={p.width} height={p.height} rx={6} fill={COLORS[p.payload.id]} />} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

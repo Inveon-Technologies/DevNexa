@@ -481,8 +481,8 @@ function Detail({ id, onSelect, show, servers }) {
                 <AreaChart data={hist}>
                   <XAxis dataKey="t" hide /><YAxis width={36} />
                   <Tooltip {...chartTooltip} />
-                  <Area type="monotone" dataKey="latency" name="Latency ms" stroke="#818cf8" fill="#818cf833" />
-                  <Area type="monotone" dataKey="mem" name="Memory MB" stroke="#22d3ee" fill="#22d3ee22" />
+                  <Area type="monotone" dataKey="latency" name="Latency ms" stroke="#2563eb" fill="#2563eb33" />
+                  <Area type="monotone" dataKey="mem" name="Memory MB" stroke="#c026d3" fill="#c026d322" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

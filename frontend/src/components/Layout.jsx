@@ -26,7 +26,7 @@ function NavItem({ item, counts, onNavigate }) {
         onClick={onNavigate}
         className={({ isActive }) =>
           `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
-            isActive ? "bg-white/[0.08] text-white" : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
+            isActive ? "bg-indigo-500/10 font-medium text-indigo-300 shadow-[inset_3px_0_0_#c026d3]" : "text-slate-400 hover:bg-indigo-500/[0.06] hover:text-indigo-300"
           }`
         }
       >
@@ -89,11 +89,11 @@ function Sidebar({ onNavigate }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 px-5 py-5">
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-500">
-          <Boxes className="h-5 w-5 text-white" />
+        <div className="grid h-9 w-9 place-items-center rounded-xl bg-brand shadow-glow">
+          <Boxes className="h-5 w-5 text-snow" />
         </div>
         <div>
-          <p className="text-[15px] font-semibold tracking-tight text-white">DevNexa</p>
+          <p className="bg-brand bg-clip-text text-[15px] font-bold tracking-tight text-transparent">DevNexa</p>
           <p className="text-[11px] text-slate-400">DevOps monitoring</p>
         </div>
       </div>
