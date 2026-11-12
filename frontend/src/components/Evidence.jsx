@@ -27,8 +27,8 @@ function Metrics({ content }) {
                   <XAxis dataKey="t" tickFormatter={(t) => clock(t).slice(0, 5)} axisLine={false} tickLine={false} minTickGap={40} />
                   <YAxis axisLine={false} tickLine={false} width={44} tickFormatter={(v) => (v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : +v.toFixed(2))} />
                   <Tooltip {...chartTooltip} labelFormatter={clock} />
-                  {a && <ReferenceLine y={a.baseline} stroke="#64748b" strokeDasharray="3 3" />}
-                  <Line dataKey={k} stroke={a ? "#fb7185" : "#818cf8"} strokeWidth={2} dot={false} />
+                  {a && <ReferenceLine y={a.baseline} stroke="#94a3b8" strokeDasharray="3 3" />}
+                  <Line dataKey={k} stroke={a ? "#e11d48" : "#2563eb"} strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>

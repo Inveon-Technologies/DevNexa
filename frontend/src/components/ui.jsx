@@ -102,7 +102,7 @@ export function PageHeader({ title, description, actions, eyebrow }) {
   return (
     <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        {eyebrow && <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-indigo-300/80">{eyebrow}</p>}
+        {eyebrow && <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-500">{eyebrow}</p>}
         <h1 className="text-2xl font-semibold tracking-tight text-white">{title}</h1>
         {description && <p className="mt-1 max-w-3xl text-sm text-slate-400">{description}</p>}
       </div>
@@ -160,7 +160,7 @@ export function Toggle({ checked, onChange, disabled, label }) {
       onClick={() => onChange(!checked)}
       className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:opacity-40 ${checked ? "bg-indigo-500" : "bg-white/10"}`}
     >
-      <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+      <span className={`inline-block h-4 w-4 transform rounded-full bg-snow shadow transition ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
     </button>
   );
 }
@@ -195,8 +195,8 @@ export function Tabs({ tabs, value, onChange }) {
 }
 
 export const chartTooltip = {
-  contentStyle: { background: "#0f1529", border: "1px solid rgba(255,255,255,.1)", borderRadius: 10, fontSize: 12 },
-  labelStyle: { color: "#cbd5e1" },
-  itemStyle: { color: "#e2e8f0" },
-  cursor: { fill: "rgba(255,255,255,0.04)" },
+  contentStyle: { background: "#ffffff", border: "1px solid rgba(11,27,63,.12)", boxShadow: "0 8px 24px -12px rgba(11,27,63,.25)", borderRadius: 10, fontSize: 12 },
+  labelStyle: { color: "#4e5c80" },
+  itemStyle: { color: "#0b1b3f" },
+  cursor: { fill: "rgba(37,99,235,0.06)" },
 };

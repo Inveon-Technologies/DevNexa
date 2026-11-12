@@ -35,7 +35,7 @@ export default function Tests() {
                   <YAxis type="category" dataKey="module" width={120} axisLine={false} tickLine={false} />
                   <Tooltip {...chartTooltip} formatter={(v, n, p) => [`${v.toFixed(2)} (${p.payload.incident_count} incidents)`, "Risk"]} />
                   <Bar dataKey="risk_score" radius={[0, 4, 4, 0]}>
-                    {risk.map((r) => <Cell key={r.module} fill={r.risk_score > 0.5 ? "#fb7185" : r.risk_score > 0.2 ? "#fbbf24" : "#34d399"} />)}
+                    {risk.map((r) => <Cell key={r.module} fill={r.risk_score > 0.5 ? "#e11d48" : r.risk_score > 0.2 ? "#d97706" : "#059669"} />)}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>

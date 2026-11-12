@@ -3,22 +3,22 @@
 @tailwind utilities;
 
 @layer base {
-  html { color-scheme: dark; }
+  html { color-scheme: light; }
   body { @apply bg-ink-950 text-slate-200 antialiased; font-feature-settings: "cv11", "ss01"; }
-  ::selection { @apply bg-indigo-500/40; }
-  * { scrollbar-width: thin; scrollbar-color: #2a3558 transparent; }
+  ::selection { @apply bg-fuchsia-500/25; }
+  * { scrollbar-width: thin; scrollbar-color: #c9d3ea transparent; }
 }
 
 @layer components {
-  .card { @apply min-w-0 rounded-2xl border border-white/[0.06] bg-ink-900; }
+  .card { @apply min-w-0 rounded-2xl border border-white/[0.08] bg-ink-900 shadow-card; }
   .card-pad { @apply p-5; }
   .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition
     disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60; }
-  .btn-primary { @apply btn bg-indigo-500 text-white hover:bg-indigo-400; }
-  .btn-ghost { @apply btn border border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.07]; }
+  .btn-primary { @apply btn bg-brand text-snow shadow-glow hover:brightness-110; }
+  .btn-ghost { @apply btn border border-white/10 bg-ink-900 text-slate-200 hover:border-indigo-400/40 hover:bg-indigo-500/[0.06] hover:text-indigo-300; }
   .btn-danger { @apply btn border border-rose-500/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20; }
-  .btn-success { @apply btn bg-emerald-500 text-emerald-950 hover:bg-emerald-400; }
-  .input { @apply w-full rounded-lg border border-white/10 bg-ink-850 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500
+  .btn-success { @apply btn bg-emerald-600 text-snow hover:bg-emerald-500; }
+  .input { @apply w-full rounded-lg border border-white/10 bg-ink-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500
     focus:border-indigo-400/60 focus:outline-none focus:ring-2 focus:ring-indigo-500/20; }
   .label { @apply mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400; }
   .table-head { @apply px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500; }
@@ -27,9 +27,9 @@
 }
 
 .bg-grid {
-  background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(37,99,235,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37,99,235,0.05) 1px, transparent 1px);
   background-size: 32px 32px;
 }
-.recharts-cartesian-grid line { stroke: rgba(255,255,255,0.06); }
-.recharts-text { fill: #94a3b8; font-size: 11px; }
+.recharts-cartesian-grid line { stroke: rgba(11,27,63,0.08); }
+.recharts-text { fill: #68738f; font-size: 11px; }
