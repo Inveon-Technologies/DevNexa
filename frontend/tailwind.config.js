@@ -1,7 +1,7 @@
 import colors from "tailwindcss/colors";
 
 /*
- * Light "blue, white and magenta" theme.
+ * Light "blue and white" theme.
  *
  * The components were written for a dark UI (light text shades such as text-slate-200 or text-rose-300,
  * white-alpha borders, ink surfaces). Instead of touching every class, the palette is remapped here:
@@ -9,7 +9,7 @@ import colors from "tailwindcss/colors";
  *   - white  -> deep navy, so headings (text-white) and hairlines (border-white/[0.06]) stay readable on white
  *   - black  -> navy, so code panels (bg-black/40) become a soft blue-grey tint
  *   - slate and the status colours have their light shades swapped for dark ones, so text keeps its contrast
- *   - indigo -> blue (primary), violet -> magenta (accent)
+ *   - indigo -> blue (primary), violet/fuchsia -> sky blue (secondary accent)
  * `snow` is real white for text on coloured buttons.
  */
 const NAVY = "#0b1b3f";
@@ -45,8 +45,8 @@ export default {
           600: "#97a1b9", 700: "#c7cee0", 800: "#e2e7f2", 900: "#eef2f9", 950: "#f6f8fc",
         },
         indigo: { ...forLight(colors.blue), 500: colors.blue[600], 600: colors.blue[700] },
-        violet: { ...forLight(colors.fuchsia), 500: colors.fuchsia[600] },
-        fuchsia: { ...forLight(colors.fuchsia), 500: colors.fuchsia[600] },
+        violet: forLight(colors.sky),
+        fuchsia: forLight(colors.sky),
         sky: forLight(colors.sky),
         cyan: forLight(colors.blue),
         emerald: forLight(colors.emerald),
@@ -54,10 +54,10 @@ export default {
         rose: forLight(colors.rose),
       },
       backgroundImage: {
-        brand: "linear-gradient(135deg, #2563eb 0%, #c026d3 100%)",
+        brand: "linear-gradient(135deg, #1e40af 0%, #2563eb 55%, #38bdf8 100%)",
       },
       boxShadow: {
-        glow: "0 0 0 1px rgba(37,99,235,.18), 0 10px 30px -14px rgba(192,38,211,.45)",
+        glow: "0 0 0 1px rgba(37,99,235,.18), 0 10px 30px -14px rgba(37,99,235,.55)",
         card: "0 1px 2px rgba(11,27,63,.05), 0 8px 24px -18px rgba(37,99,235,.35)",
       },
       keyframes: { pulseDot: { "0%,100%": { opacity: 1 }, "50%": { opacity: 0.35 } } },

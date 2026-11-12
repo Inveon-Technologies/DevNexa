@@ -5,7 +5,7 @@
 @layer base {
   html { color-scheme: light; }
   body { @apply bg-ink-950 text-slate-200 antialiased; font-feature-settings: "cv11", "ss01"; }
-  ::selection { @apply bg-fuchsia-500/25; }
+  ::selection { @apply bg-indigo-500/20; }
   * { scrollbar-width: thin; scrollbar-color: #c9d3ea transparent; }
 }
 

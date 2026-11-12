@@ -1,9 +1,10 @@
-import { Boxes, ChevronDown, Github, LogOut, Menu, X } from "lucide-react";
+import { ChevronDown, Github, LogOut, Menu, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { usePoll } from "../hooks";
 import { ADMIN_NAV, NAV } from "../nav";
+import Logo from "./Logo";
 
 const MORE_KEY = "devnexa.nav.more";
 
@@ -26,7 +27,7 @@ function NavItem({ item, counts, onNavigate }) {
         onClick={onNavigate}
         className={({ isActive }) =>
           `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
-            isActive ? "bg-indigo-500/10 font-medium text-indigo-300 shadow-[inset_3px_0_0_#c026d3]" : "text-slate-400 hover:bg-indigo-500/[0.06] hover:text-indigo-300"
+            isActive ? "bg-indigo-500/10 font-medium text-indigo-300 shadow-[inset_3px_0_0_#2563eb]" : "text-slate-400 hover:bg-indigo-500/[0.06] hover:text-indigo-300"
           }`
         }
       >
@@ -89,11 +90,9 @@ function Sidebar({ onNavigate }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 px-5 py-5">
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-brand shadow-glow">
-          <Boxes className="h-5 w-5 text-snow" />
-        </div>
+        <Logo className="h-9 w-9 shrink-0" />
         <div>
-          <p className="bg-brand bg-clip-text text-[15px] font-bold tracking-tight text-transparent">DevNexa</p>
+          <p className="text-[16px] font-bold tracking-tight text-navy">Dev<span className="text-indigo-400">Nexa</span></p>
           <p className="text-[11px] text-slate-400">DevOps monitoring</p>
         </div>
       </div>
@@ -152,7 +151,8 @@ export default function Layout({ children }) {
           <button onClick={() => setOpen(true)} aria-label="Open menu" className="text-slate-300">
             <Menu className="h-5 w-5" />
           </button>
-          <span className="font-semibold text-white">DevNexa</span>
+          <Logo className="h-7 w-7" />
+          <span className="font-bold text-navy">Dev<span className="text-indigo-400">Nexa</span></span>
         </div>
         <main key={loc.pathname} className="mx-auto min-w-0 max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
       </div>
