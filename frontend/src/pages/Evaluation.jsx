@@ -6,7 +6,7 @@ import { Badge, Card, chartTooltip, ErrorBox, Loading, PageHeader, StatusBadge }
 import { duration, pct, time } from "../format";
 import { usePoll } from "../hooks";
 
-const COLORS = { devnexa: "#2563eb", no_rag: "#c026d3", baseline: "#94a3b8" };
+const COLORS = { devnexa: "#2563eb", no_rag: "#38bdf8", baseline: "#94a3b8" };
 const METRICS = [
   { key: "failure_detection_s", label: "Failure detection time", fmt: duration, better: "lower" },
   { key: "rca_accuracy", label: "Root-cause accuracy (1st diagnosis)", fmt: (v) => pct(v), better: "higher" },
